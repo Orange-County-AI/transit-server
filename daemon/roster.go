@@ -196,7 +196,7 @@ func (d *Daemon) sendRoster(ctx context.Context) error {
 	d.mu.RLock()
 	agents := append([]WireAgent(nil), d.roster...)
 	d.mu.RUnlock()
-	return connection.write(ctx, WireFrame{T: "roster", Agents: agents})
+	return connection.write(ctx, WireFrame{T: "roster", Agents: &agents})
 }
 
 func (d *Daemon) localAgentByPane(paneID string) (HerdrAgent, bool) {

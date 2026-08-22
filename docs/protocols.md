@@ -108,7 +108,7 @@ per frame. Every id is an idempotency key, and both edges deduplicate ids.
 ### Daemon to Worker
 
 - `{"t":"hello","proto":1,"daemon_ver":"…","host":"titan"}`
-- `{"t":"roster","agents":[{"name","kind","pane_id","status","cwd","title","named_by":"user|auto"}]}` — full snapshot on connect, on change, every 60 s
+- `{"t":"roster","agents":[{"name","kind","pane_id","status","cwd","title","named_by":"user|auto"}]}` — full snapshot on connect, on change, every 60 s. A host with no agents sends `"agents": []`; the field is never omitted. The Worker also accepts an absent or null `agents` as a roster of none, because a daemon that omits it is in the wild, but a present non-array is still `invalid_frame`.
 - `{"t":"send","id","from","to","body","reply_to?","ts"}` → answered by `send_ack`/`send_nak`
 - `{"t":"deliver_ack","id","agent?"}` / `{"t":"deliver_nak","id","agent?","code","retryable":bool}` — `agent` echoes the recipient of the `deliver` frame being settled, so the Worker keeps delivery bookkeeping per recipient (one message id may be queued to several agents on one host). `draft_busy` is a retryable hold rather than an error: the HostHub leaves the entry's attempt count unchanged, and the daemon's next roster snapshot — sent as soon as the composer clears — dispatches it, with a five-minute alarm as the backstop. An older daemon omits `agent`; the Worker then settles the oldest queued entry for the id, so a legacy daemon drains a same-host fan-out one ack at a time.
 - `{"t":"rpc","rid","method","params"}` (tool calls) · `{"t":"pong"}`

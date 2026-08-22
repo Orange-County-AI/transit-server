@@ -28,13 +28,19 @@ type WireAgent struct {
 }
 
 type WireFrame struct {
-	T         string          `json:"t"`
-	Proto     int             `json:"proto,omitempty"`
-	DaemonVer string          `json:"daemon_ver,omitempty"`
-	Host      string          `json:"host,omitempty"`
-	HostID    string          `json:"host_id,omitempty"`
-	Org       string          `json:"org,omitempty"`
-	Agents    []WireAgent     `json:"agents,omitempty"`
+	T         string `json:"t"`
+	Proto     int    `json:"proto,omitempty"`
+	DaemonVer string `json:"daemon_ver,omitempty"`
+	Host      string `json:"host,omitempty"`
+	HostID    string `json:"host_id,omitempty"`
+	Org       string `json:"org,omitempty"`
+	// A pointer so a roster of none is sent as `"agents": []` rather than
+	// dropped: `omitempty` elides an empty slice, so an agentless host sent
+	// `{"t":"roster"}`, the Worker read `undefined` where an array is required,
+	// rejected the frame and closed 4002, and the host lost its connection the
+	// moment its last agent exited. The frame is shared by every type, so the
+	// pointer is what keeps `agents` off a deliver or ack frame.
+	Agents    *[]WireAgent    `json:"agents,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	From      string          `json:"from,omitempty"`
 	To        string          `json:"to,omitempty"`
