@@ -198,12 +198,30 @@ a pane, the daemon logs `transit: delivery held — <harness> has unsent input i
 pane <pane_id>; retrying until the composer is clear`.
 `TRANSIT_DRAFT_GUARD=0` or `false` disables this protection.
 
-**Decision — stall recovery rechecks the composer before submitting it.** A
+**Decision — stall recovery always submits, and never abandons a paste.** A
 large paste can collapse into an OMP attachment chip and absorb Herdr's submit
-key, producing `agent_prompt_stalled`; before its recovery `Enter`, the daemon
-reads the pane again and refuses to submit when the composer gained content
-other than Transit's own paste. A person who starts typing during that paste
-window therefore does not have their draft submitted.
+key, producing `agent_prompt_stalled`. The recovery `Enter` is sent regardless
+of what else the composer holds; when it holds text that is not Transit's own
+paste, the daemon raises a notification saying the person's draft was submitted
+with the message. **Rationale:** by that point Transit's bytes are already in
+someone's input and the only exits are to submit them or to delete text Transit
+does not own. Vetoing the `Enter` was worse than either horn it chose between:
+the message never arrived, the input stayed corrupted, and every retry pasted
+another copy. Holding *before* the paste remains the real protection.
+
+**Decision — a delivery whose own paste is still unsent is submitted, not
+typed again.** When the composer already holds exactly this envelope, the
+daemon presses `Enter` instead of calling `agent.prompt`. **Rationale:** a
+second `agent.prompt` appends a second copy, which is how a stalled delivery
+accumulated in a composer.
+
+**Decision — the pane, not the error code, decides whether a prompt landed.**
+After any failed `agent.prompt` the daemon re-reads the agent and acknowledges
+the delivery when `state_change_seq` moved. **Rationale:** Herdr answers a
+coded `timeout` whenever its wait outlives the agent's turn, which is routine;
+gating the proof on a codeless failure reported delivered envelopes as failed,
+so the HostHub redelivered them and agents read the same message two and three
+times.
 
 **Decision — each daemon maintains one outbound WSS connection to the Worker
 using `transit-wire/1`, reconnecting with jittered backoff.** It authenticates

@@ -92,30 +92,45 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 		return "agent_launch_pending", true, fmt.Errorf("agent %s is launching", frame.Agent)
 	}
 
+	stranded := false
 	if draftGuardEnabled() {
-		if hold, held := d.composerHold(ctx, agent, frame.Envelope); held {
+		switch state := d.composerState(ctx, agent, frame.Envelope); state {
+		case composerForeignDraft:
+			hold := draftHold{PaneID: agent.PaneID, Agent: agent.Kind, At: time.Now().UTC()}
 			d.applyDraftHold(ctx, hold)
 			return "draft_busy", true, fmt.Errorf("%s has unsent input in pane %s", hold.Agent, hold.PaneID)
+		case composerOwnPaste:
+			stranded = true
 		}
 	}
 	d.releaseDraftHold(agent.PaneID)
 
 	before := agent.StateChangeSeq
-	result := d.herdr.PromptAgent(ctx, agent.Name, frame.Envelope, promptTimeout)
+	// A previous attempt's envelope still sitting unsent is submitted rather
+	// than typed again: pasting a second copy is how a stalled delivery used to
+	// accumulate in someone's composer.
+	prompt := d.herdr.PromptAgent
+	if stranded {
+		prompt = d.herdr.SubmitPaste
+	}
+	result := prompt(ctx, agent.Name, frame.Envelope, promptTimeout)
 	if result.OK {
 		if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
 			return "history_write_failed", true, err
 		}
 		return "", false, nil
 	}
-	if result.Code == "" {
-		current, getErr := d.herdr.GetAgent(ctx, agent.Name)
-		if getErr == nil && current != nil && current.StateChangeSeq != before {
-			if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
-				return "history_write_failed", true, err
-			}
-			return "", false, nil
+	// Ask the pane whether the prompt landed anyway, whatever the failure was
+	// called. Herdr reports a coded `timeout` when the wait outlives the
+	// agent's turn, and gating this proof on a codeless failure meant a
+	// delivered envelope was reported failed — so the Worker redelivered it and
+	// the agent read the same message twice.
+	if current, getErr := d.herdr.GetAgent(ctx, agent.Name); getErr == nil && current != nil &&
+		current.StateChangeSeq != before {
+		if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
+			return "history_write_failed", true, err
 		}
+		return "", false, nil
 	}
 	message := result.Error
 	if message == "" {
@@ -124,23 +139,33 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 	return deliveryFailureCode(result), true, fmt.Errorf("%s", message)
 }
 
-// composerHold reports unsent human input in the target pane. The envelope is
-// part of the question: a delivery whose own paste is still sitting unsent in
-// the composer — a stall the recovery Enter did not clear — must not be held
-// behind itself forever.
-func (d *Daemon) composerHold(ctx context.Context, agent HerdrAgent, envelope string) (draftHold, bool) {
+type composerVerdict int
+
+const (
+	// composerClear means nothing this build can read is holding input.
+	composerClear composerVerdict = iota
+	// composerForeignDraft means text that is not ours is in the composer.
+	composerForeignDraft
+	// composerOwnPaste means only this delivery's own unsent paste is there.
+	composerOwnPaste
+)
+
+// composerState judges the target pane. The envelope is part of the question: a
+// delivery whose own paste is still sitting unsent must be submitted, not held
+// behind itself and not pasted again.
+func (d *Daemon) composerState(ctx context.Context, agent HerdrAgent, envelope string) composerVerdict {
 	screen, err := d.herdr.PaneScreen(ctx, agent.PaneID)
 	if err != nil {
-		return draftHold{}, false
+		return composerClear
 	}
 	content, located := composerContent(agent.Kind, screen)
 	if !located || strings.TrimSpace(content) == "" {
-		return draftHold{}, false
+		return composerClear
 	}
 	if composerHoldsOnlyPaste(content, envelope) {
-		return draftHold{}, false
+		return composerOwnPaste
 	}
-	return draftHold{PaneID: agent.PaneID, Agent: agent.Kind, At: time.Now().UTC()}, true
+	return composerForeignDraft
 }
 
 // applyDraftHold records the hold and says so once per pane: a held delivery is
