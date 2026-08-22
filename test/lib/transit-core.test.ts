@@ -110,6 +110,14 @@ describe("transit-wire/1", () => {
       code: "agent_prompt_failed",
       retryable: true,
     });
+    // A host whose last agent exited sends a roster with no agents, and Go's
+    // `omitempty` drops the field rather than encoding `[]`. Treating that as
+    // malformed closed the host's socket with 4002 and took the whole workspace
+    // offline, so an absent roster decodes as a roster of none.
+    expect(decodeDaemonFrame('{"t":"roster"}')).toEqual({ t: "roster", agents: [] });
+    expect(decodeDaemonFrame('{"t":"roster","agents":[]}')).toEqual({ t: "roster", agents: [] });
+    // A present but non-array agents field is still malformed.
+    expect(() => decodeDaemonFrame('{"t":"roster","agents":"alice"}')).toThrow(WireError);
     // An older daemon omits the agent echo; the frame must still decode.
     expect(decodeDaemonFrame('{"t":"deliver_ack","id":"dlv_001122334455"}')).toEqual({
       t: "deliver_ack",

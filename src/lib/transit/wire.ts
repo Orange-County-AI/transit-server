@@ -146,6 +146,14 @@ export function decodeDaemonFrame(raw: string): DaemonFrame | null {
       };
     }
     case "roster": {
+      // A host with no agents is a normal state, and Go's `omitempty` drops the
+      // empty array rather than sending `[]`, so an absent `agents` is a roster
+      // of none - not a malformed frame. Rejecting it closed the whole host
+      // connection with 4002 the moment its last agent exited, which stranded a
+      // workspace whose only session had not been restarted yet.
+      if (frame.agents === undefined || frame.agents === null) {
+        return { t: "roster", agents: [] };
+      }
       if (!Array.isArray(frame.agents)) {
         throw new WireError("agents must be an array", "invalid_frame");
       }
