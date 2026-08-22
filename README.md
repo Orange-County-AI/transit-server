@@ -13,7 +13,7 @@ mise trust && mise install
 mise run install
 ```
 
-Set the required Worker secrets (`BETTER_AUTH_SECRET` and `TRANSIT_MASTER_KEY`) and the canonical `BETTER_AUTH_URL`, update the custom-domain `routes` entry in `wrangler.jsonc`, then create data and deploy:
+Generate the Worker secrets with `mise run secret:put`, set `vars.BETTER_AUTH_URL` in `wrangler.jsonc` to the origin you will serve from, and uncomment the `routes` entry there if you want a custom domain rather than the `workers.dev` URL. Then create data and deploy:
 
 ```sh
 mise run d1:create
