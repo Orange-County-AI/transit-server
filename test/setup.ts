@@ -8,9 +8,10 @@ beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 });
 
-// `singleWorker: true` in vitest.config.ts shares one D1 across the whole run,
-// so we reset user-data tables between cases. d1_migrations / sqlite_* / _cf_*
-// are wrangler & sqlite bookkeeping and survive the truncate.
+// One D1 is shared by the whole run, so we reset user-data tables between
+// cases. This is only safe because the vitest configs set
+// `fileParallelism: false`; see the comment there. d1_migrations / sqlite_* /
+// _cf_* are wrangler & sqlite bookkeeping and survive the truncate.
 beforeEach(async () => {
   resetConnectorMock();
   const { results } = await env.DB.prepare(

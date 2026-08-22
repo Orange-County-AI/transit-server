@@ -32,6 +32,12 @@ export default defineConfig(async () => {
       // must not be loaded into the Workers pool.
       include: ["test/**/*.test.ts"],
       setupFiles: ["./test/setup.ts"],
+      // One D1 backs the whole run and `test/setup.ts` truncates every
+      // application table in `beforeEach`. Running files concurrently means one
+      // file's reset wipes another's fixtures mid-test, which surfaces as
+      // nondeterministic `no_route` naks, zeroed ack sequences, and hung
+      // WebSocket waits. Serial files are the price of a shared database.
+      fileParallelism: false,
       // Password hashing (scrypt) under workerd is slow, and multi-step e2e
       // flows (e.g. test/password-reset.test.ts) chain several hashing requests
       // — the 5s default times out on slower CI runners.
