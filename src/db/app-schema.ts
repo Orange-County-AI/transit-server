@@ -249,6 +249,8 @@ export const usageMonth = sqliteTable(
     orgId: text("org_id").notNull(),
     period: text("period").notNull(),
     messages: integer("messages").notNull().default(0),
+    graceStartedAt: integer("grace_started_at", { mode: "timestamp_ms" }),
+    warningSentAt: integer("warning_sent_at", { mode: "timestamp_ms" }),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
   (table) => [primaryKey({ columns: [table.orgId, table.period] })],

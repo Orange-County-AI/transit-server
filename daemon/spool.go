@@ -49,7 +49,7 @@ func OpenStore(root string) (*Store, error) {
 	if root == "" {
 		return nil, fmt.Errorf("store root is required")
 	}
-	for _, name := range []string{"outbox", "history", "dead"} {
+	for _, name := range []string{"outbox", "history", filepath.Join("history", "in"), "dead"} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, fmt.Errorf("create %s: %w", name, err)
 		}
@@ -289,19 +289,41 @@ func (s *Store) ReclaimOrphans() error {
 	})
 }
 
-func (s *Store) HistoryExists(id string) bool {
-	_, err := os.Stat(filepath.Join(s.root, "history", id+".json"))
-	return err == nil
+// IncomingRecorded reports whether this host already injected a delivery. It
+// deliberately ignores the outbox's own record of the same id: when both ends
+// of a message live on one host they share a daemon, so a flat history
+// namespace let the sender's ack answer the recipient's dedupe check and the
+// daemon acknowledged a delivery it never injected.
+func (s *Store) IncomingRecorded(id string) bool {
+	if _, err := os.Stat(filepath.Join(s.root, "history", "in", id+".json")); err == nil {
+		return true
+	}
+	// Records written before the split are flat, and only an injected delivery
+	// carries an envelope.
+	body, err := os.ReadFile(filepath.Join(s.root, "history", id+".json"))
+	if err != nil {
+		return false
+	}
+	var record HistoryRecord
+	return json.Unmarshal(body, &record) == nil && record.Envelope != ""
 }
 
 func (s *Store) RecordIncoming(id, envelope string) error {
 	return s.withLock(func() error {
 		return writeJSONAtomic(
-			filepath.Join(s.root, "history", id+".json"),
+			filepath.Join(s.root, "history", "in", id+".json"),
 			HistoryRecord{ID: id, Envelope: envelope, At: time.Now().UTC()},
 			0o600,
 		)
 	})
+}
+
+// SentRecorded reports whether the outbox archived this id after the Worker
+// committed it. It is the sender's own bookkeeping and never a delivery
+// receipt.
+func (s *Store) SentRecorded(id string) bool {
+	_, err := os.Stat(filepath.Join(s.root, "history", id+".json"))
+	return err == nil
 }
 
 func (s *Store) Counts() (outbox, dead int, err error) {

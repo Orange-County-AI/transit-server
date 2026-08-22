@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { renderEnvelope, renderFull } from "../lib/transit/envelope";
 import { createRoom } from "../lib/transit/rooms";
 
+
 import {
   AddressError,
   formatAgentAddress,
@@ -33,6 +34,7 @@ const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_DELIVERY_ATTEMPTS = 40;
 const DELIVERY_TTL_MS = 24 * 60 * 60 * 1_000;
 const MAX_RETRY_MS = 5 * 60 * 1_000;
+const DRAFT_HOLD_BACKSTOP_MS = 5 * 60 * 1_000;
 const QUEUE_BATCH_SIZE = 128;
 const textEncoder = new TextEncoder();
 
@@ -109,6 +111,7 @@ type ActivityEvent = {
 };
 
 export class HostHub extends DurableObject<Env> {
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // The daemon emits a pong heartbeat every 30 seconds. Auto-responding with
@@ -439,7 +442,9 @@ export class HostHub extends DurableObject<Env> {
     }
   }
 
-  private background(event: string, promise: Promise<unknown>): void {
+  /** Fire-and-forget with a logged failure. `protected` so a subclass that
+   * overrides the metering seam can report its own background work the same way. */
+  protected background(event: string, promise: Promise<unknown>): void {
     this.ctx.waitUntil(
       promise.catch((error) => {
         console.error(
@@ -659,7 +664,9 @@ export class HostHub extends DurableObject<Env> {
         const code: SendNakCode =
           error instanceof Error && error.message === "body_too_large"
             ? "body_too_large"
-            : "not_member";
+            : error instanceof Error && error.message === "plan_limit"
+              ? "plan_limit"
+              : "not_member";
         await this.rejectSend(socket, stateKey, frame.id, code);
         return;
       }
@@ -971,6 +978,37 @@ export class HostHub extends DurableObject<Env> {
     if (!item) return;
     if (!retryable) {
       await this.markDead(marker.queueKey!, item, code);
+      return;
+    }
+    if (code === "draft_busy") {
+      // A hold is not an attempt: a person composing for a few minutes would
+      // otherwise exhaust the 40-attempt budget and leave the message dead.
+      item.attempts = Math.max(item.attempts - 1, 0);
+      item.lastError = code;
+      await this.ctx.storage.put(marker.queueKey!, item);
+      if (messageId.startsWith("tx_")) {
+        this.background(
+          "delivery_hold_write_failed",
+          this.env.DB.prepare(
+            `INSERT INTO message_delivery
+             (message_id, target_addr, status, attempts, last_error, updated_at)
+             VALUES (?, ?, 'queued', ?, ?, ?)
+             ON CONFLICT(message_id, target_addr) DO UPDATE SET
+               status = 'queued',
+               attempts = excluded.attempts,
+               last_error = excluded.last_error,
+               updated_at = excluded.updated_at`,
+          )
+            .bind(messageId, item.targetAddr, item.attempts, item.lastError, Date.now())
+            .run(),
+        );
+      }
+      // Polling a composer from here would be the wrong side of the wire: the
+      // daemon watches the held pane for free and sends a roster frame the
+      // moment it clears, which dispatches immediately. This alarm is only the
+      // backstop for a daemon that died still holding, so it is spaced to
+      // spend a twelfth of the hourly alarm budget rather than all of it.
+      await budgetedAlarm(this.ctx.storage, Date.now() + DRAFT_HOLD_BACKSTOP_MS);
       return;
     }
     item.lastError = code;

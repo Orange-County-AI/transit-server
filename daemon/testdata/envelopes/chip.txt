@@ -1,0 +1,24 @@
+<transit from="dana@titan" id="tx_b1c94f55d069" schema="transit/1" kind="dm">
+<preview>can you check whether the Friday batch went out</preview>
+line 1 of the delivered envelope body, long enough to wrap in the composer
+line 2 of the delivered envelope body, long enough to wrap in the composer
+line 3 of the delivered envelope body, long enough to wrap in the composer
+line 4 of the delivered envelope body, long enough to wrap in the composer
+line 5 of the delivered envelope body, long enough to wrap in the composer
+line 6 of the delivered envelope body, long enough to wrap in the composer
+line 7 of the delivered envelope body, long enough to wrap in the composer
+line 8 of the delivered envelope body, long enough to wrap in the composer
+line 9 of the delivered envelope body, long enough to wrap in the composer
+line 10 of the delivered envelope body, long enough to wrap in the composer
+line 11 of the delivered envelope body, long enough to wrap in the composer
+line 12 of the delivered envelope body, long enough to wrap in the composer
+line 13 of the delivered envelope body, long enough to wrap in the composer
+line 14 of the delivered envelope body, long enough to wrap in the composer
+line 15 of the delivered envelope body, long enough to wrap in the composer
+line 16 of the delivered envelope body, long enough to wrap in the composer
+line 17 of the delivered envelope body, long enough to wrap in the composer
+line 18 of the delivered envelope body, long enough to wrap in the composer
+line 19 of the delivered envelope body, long enough to wrap in the composer
+line 20 of the delivered envelope body, long enough to wrap in the composer
+line 21 of the delivered envelope body, long enough to wrap in the composer
+</transit>

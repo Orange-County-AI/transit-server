@@ -155,7 +155,7 @@ func TestNativeDeliveryAcknowledgementRecordsHistory(t *testing.T) {
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
-	if !d.store.HistoryExists("tx_native_ack") {
+	if !d.store.IncomingRecorded("tx_native_ack") {
 		t.Fatal("successful native delivery was not recorded")
 	}
 }
@@ -183,7 +183,7 @@ func TestNativeDeliveryNakDoesNotRecordHistory(t *testing.T) {
 	if outcome.code != "transcript_timeout" || !outcome.retryable || outcome.err == nil {
 		t.Fatalf("nak outcome = %#v", outcome)
 	}
-	if d.store.HistoryExists("tx_native_nak") {
+	if d.store.IncomingRecorded("tx_native_nak") {
 		t.Fatal("nacked native delivery was recorded")
 	}
 }

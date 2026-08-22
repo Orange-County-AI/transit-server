@@ -1,0 +1,35 @@
+  │ 3 — engine              │ Ready to start; requirements from the canary are recorded in the plan                   │
+  │ (clientinfra.py)        │                                                                                         │
+  ├─────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 4 — lifecycle ops       │ After 3                                                                                 │
+  └─────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Three decisions now gate Phase 3 (all in the plan's decision list): the exact SSH-contract requirements (dedicated user
+  + per-client keypair is my rec), the lasso Include fix (rec: patch hosts.go so the engine never edits your hand-written
+  ssh config), and the registry choice (which also decides whether the engine owns the docker save transfer step or
+  retires it). Phase 3's live pass will also need the mapping.json/main question answered for real — same one you deferred
+  for the canary.
+
+  Say the word on any of those and I'll dispatch the next phase; the branch is otherwise ready for your review.
+
+✻ Sautéed for 20m 46s
+
+※ recap: Client-owned infra: the plan is approved and Phase 2 (client-box runtime bundle) is committed on branch
+  client-runtime-bundle, proven on a live Hetzner canary in ~6 minutes. Next: your review/merge plus the registry and
+  SSH-contract decisions gating Phase 3. (disable recaps in /config)
+
+❯ /compact
+  ⎿  Compacted (ctrl+o to see full summary)
+  ⎿  Read clients/runtime/workspace.env (37 lines)
+  ⎿  Referenced file clients/runtime/install.sh
+  ⎿  Read clients/runtime/teardown.sh (160 lines)
+  ⎿  Referenced file clients/runtime/verify.sh
+  ⎿  Read clients/runtime/prereqs.txt (124 lines)
+  ⎿  Plan file referenced (~/.claude/plans/design-the-client-owned-infrastructure-synthetic-candle.md)
+                                                                                  ✔ Update installed · Restart to update
+───────────────────────────────────────────────────────────────────────────────────── client-owned-infrastructure-design ─
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  [░░░░░░░░░░] 0%  Fable 5  stephan@orangecountyai.com                                                               /rc
+  (client-runtime-bundle)  client-infra-plan
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent

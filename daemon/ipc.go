@@ -189,6 +189,7 @@ func (d *Daemon) statusResponse() map[string]any {
 		"outbox":         outbox, "dead": dead,
 	}
 	d.mu.RUnlock()
+	response["draft_holds"] = d.draftHolds()
 	return success(response)
 }
 
@@ -216,7 +217,7 @@ func (d *Daemon) inboxResponse() map[string]any {
 	if err != nil {
 		return failure("store_error", err.Error())
 	}
-	return success(map[string]any{"outbox": outbox, "dead": dead})
+	return success(map[string]any{"outbox": outbox, "dead": dead, "draft_holds": d.draftHolds()})
 }
 
 func (d *Daemon) sendResponse(ctx context.Context, request map[string]any) map[string]any {

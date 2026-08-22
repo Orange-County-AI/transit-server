@@ -182,7 +182,7 @@ func (d *herdrSocket) PromptAgent(ctx context.Context, target, text string, time
 	if err != nil {
 		var apiError *HerdrAPIError
 		if errors.As(err, &apiError) && apiError.Code == "agent_prompt_stalled" {
-			if result, definitive := d.flushPastedPrompt(callCtx, target, timeout); definitive {
+			if result, definitive := d.flushPastedPrompt(callCtx, target, text, timeout); definitive {
 				return result
 			}
 		}
@@ -203,10 +203,31 @@ func promptFailure(err error) PromptResult {
 	return PromptResult{Error: err.Error()}
 }
 
-func (d *herdrSocket) flushPastedPrompt(ctx context.Context, target string, timeout time.Duration) (PromptResult, bool) {
+// flushPastedPrompt recovers a paste that Herdr's submit key did not send: a
+// large envelope collapses into an OMP attachment chip, and the collapse
+// absorbs the key, so the envelope sits unsent in the composer. One Enter
+// submits it — but only while the composer holds nothing except that paste.
+// Once a person has typed alongside it, Enter would submit their draft too,
+// which is the whole thing the draft guard exists to prevent, so the delivery
+// is held instead. Accepting the key proves nothing either: only a moved
+// state_change_seq proves the agent took the prompt, so every failed
+// precondition reports false and leaves the original stall standing.
+func (d *herdrSocket) flushPastedPrompt(ctx context.Context, target, text string, timeout time.Duration) (PromptResult, bool) {
 	agent, err := d.GetAgent(ctx, target)
 	if err != nil || agent == nil || agent.PaneID == "" {
 		return PromptResult{}, false
+	}
+	if draftGuardEnabled() {
+		screen, screenErr := d.PaneScreen(ctx, agent.PaneID)
+		if screenErr == nil {
+			content, located := composerContent(agent.Kind, screen)
+			if located && !composerHoldsOnlyPaste(content, text) {
+				return PromptResult{
+					Code:  "draft_busy",
+					Error: fmt.Sprintf("%s gained unsent input in pane %s during the paste", agent.Kind, agent.PaneID),
+				}, true
+			}
+		}
 	}
 	before := agent.StateChangeSeq
 	if _, err := d.call(ctx, "pane.send_keys", map[string]any{"pane_id": agent.PaneID, "keys": []string{"Enter"}}); err != nil {

@@ -1,0 +1,7 @@
+
+/tmp ☸ default  v22.23.2  v3.14.4
+❯ echo shell pane fixture
+shell pane fixture
+
+/tmp ☸ default  v22.23.2  v3.14.4
+❯

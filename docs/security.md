@@ -76,13 +76,13 @@ available only where the room policy permits it.
 
 Envelope bodies are peer or user data, never operator instructions. This rule is stated in every schema document and in the daemon MCP manifest. The renderer neutralizes `</transit` case-insensitively in body content. Channel previews are bounded and strip `<...>` substrings before they reach an agent.
 
-The Herdr path uses a composer draft guard and verifies prompt state before acknowledgement. Native adapters persist a harness-owned receipt first: Claude Code confirms the delivery ID reached its transcript, OMP and Pi append a custom session entry after `pi.sendUserMessage`, and OpenCode confirms the delivery ID appears in its persisted session messages.
+The Herdr path reads the visible, ANSI-stripped pane before delivery and holds only positively recognized unsent input in a supported composer. It fails open for an unfamiliar or unreadable composer so a durable queue cannot be starved; a retryable `draft_busy` hold preserves the delivery's attempt count and resumes when the daemon reports the composer clear. Before recovering an `agent_prompt_stalled` paste with `Enter`, it reads the composer again and does not submit input that a person added during the paste window. Native adapters persist a harness-owned receipt first, but are not composer-guarded: they register sessions, not panes, and no harness API exposes composer state. Claude Code confirms the delivery ID reached its transcript, OMP and Pi append a custom session entry after `pi.sendUserMessage`, and OpenCode confirms the delivery ID appears in its persisted session messages.
 
 ## 4. SSRF and egress capability control
 
 Reply callback destinations are capabilities selected by the operator, not arbitrary URLs supplied by an event. An event-provided `reply_url` is accepted only when it matches an operator-declared literal `reply_url_prefixes` entry. Prefixes end in `/` and exclude query strings, fragments, and userinfo.
 
-The capability is rechecked at post time, so revoking a prefix also prevents a reply that was already queued. Callback requests refuse redirects, use a 10-second timeout, and refuse userinfo. Self-hosted Transit instances inherit these same bounds.
+The capability is rechecked at post time, so revoking a prefix also prevents a reply that was already queued. Callback requests refuse redirects, use a 10-second timeout, and refuse userinfo.
 
 ## 5. Secret handling
 

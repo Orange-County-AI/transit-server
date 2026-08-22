@@ -126,6 +126,51 @@ async function sendAndRead(
   return response;
 }
 
+type QueuedDelivery = {
+  attempts: number;
+  lastAttemptAt?: number;
+  lastError?: string;
+};
+
+async function queuedDelivery(stub: DurableObjectStub) {
+  return runInDurableObject(stub, async (_instance, state) => {
+    const entries = await state.storage.list<QueuedDelivery>({ prefix: "q:" });
+    const [key, item] = entries.entries().next().value ?? [];
+    return { key, item, alarm: await state.storage.getAlarm() };
+  });
+}
+
+async function makeQueuedDeliveryDue(stub: DurableObjectStub) {
+  await runInDurableObject(stub, async (_instance, state) => {
+    const entries = await state.storage.list<QueuedDelivery>({ prefix: "q:" });
+    const [key, item] = entries.entries().next().value ?? [];
+    expect(key).toBeDefined();
+    await state.storage.put(key!, {
+      ...item!,
+      lastAttemptAt: Date.now() - 6_000,
+    });
+  });
+}
+
+function refreshRoster(socket: WebSocket, credentials: DaemonCredentials, agent: string): void {
+  socket.send(
+    JSON.stringify({
+      t: "roster",
+      agents: [
+        {
+          name: agent,
+          kind: "omp",
+          pane_id: `${credentials.host}:p1`,
+          status: "idle",
+          cwd: `/work/${agent}`,
+          title: agent,
+          named_by: "user",
+        },
+      ],
+    }),
+  );
+}
+
 describe("direct messages", () => {
   it("commits, delivers, acknowledges, deduplicates, and rejects invalid sends", async () => {
     const cookie = await signUp();
@@ -271,6 +316,119 @@ describe("direct messages", () => {
           .first<{ status: string; last_error: string }>(),
       )
       .toEqual({ status: "dead", last_error: "agent_refused" });
+    await Promise.all([closeSocket(alpha), closeSocket(beta)]);
+  });
+  it("holds draft-busy deliveries without spending attempts and resumes them", async () => {
+    const cookie = await signUp();
+    const alphaCredentials = await enrollHost(cookie, "alpha");
+    const betaCredentials = await enrollHost(cookie, "beta");
+    const alpha = await connectDaemon(alphaCredentials, "alice");
+    const beta = await connectDaemon(betaCredentials, "bob");
+    const betaHub = env.HOST_HUB.getByName(`org:${betaCredentials.org}:host:beta`);
+    const id = "tx_0a0b0c0d0e0f";
+    const firstDelivery = nextFrame(beta);
+    const sent = sendAndRead(alpha, {
+      t: "send",
+      id,
+      from: "alice@alpha",
+      to: "bob@beta",
+      body: "wait until the draft clears",
+      ts: new Date().toISOString(),
+    });
+    expect(await sent).toEqual({ t: "send_ack", id });
+    expect(await firstDelivery).toMatchObject({ t: "deliver", id, agent: "bob" });
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const beforeNak = Date.now();
+      beta.send(
+        JSON.stringify({
+          t: "deliver_nak",
+          id,
+          agent: "bob",
+          code: "draft_busy",
+          retryable: true,
+        }),
+      );
+      await flushSocket(beta, `draft-hold-${attempt}`);
+      const held = await queuedDelivery(betaHub);
+      expect(held.item).toMatchObject({ attempts: 0, lastError: "draft_busy" });
+      // The hold's own alarm is a backstop for a daemon that died holding, not
+      // a poll: each one spends a 120-per-hour alarm budget shared with every
+      // other delivery on the host.
+      expect(held.alarm).toBeGreaterThanOrEqual(beforeNak + 4 * 60_000);
+      expect(held.alarm).toBeLessThanOrEqual(beforeNak + 6 * 60_000);
+
+      if (attempt === 9) break;
+      // The daemon nudges with a roster snapshot the moment the composer
+      // clears, which is what actually resumes a held delivery.
+      const delivery = nextFrame(beta);
+      await makeQueuedDeliveryDue(betaHub);
+      refreshRoster(beta, betaCredentials, "bob");
+      expect(await delivery).toMatchObject({ t: "deliver", id, agent: "bob" });
+    }
+
+    await expect
+      .poll(async () =>
+        env.DB.prepare(
+          "SELECT status, attempts, last_error FROM message_delivery WHERE message_id = ?",
+        )
+          .bind(id)
+          .first<{ status: string; attempts: number; last_error: string }>(),
+      )
+      .toEqual({ status: "queued", attempts: 0, last_error: "draft_busy" });
+
+    beta.send(JSON.stringify({ t: "deliver_ack", id, agent: "bob" }));
+    await flushSocket(beta, "draft-hold-ack");
+    beta.send(JSON.stringify({ t: "deliver_ack", id, agent: "bob" }));
+    await flushSocket(beta, "duplicate-draft-hold-ack");
+    const settled = await queuedDelivery(betaHub);
+    expect(settled.item).toBeUndefined();
+    await expect
+      .poll(async () =>
+        env.DB.prepare(
+          "SELECT status, attempts, last_error FROM message_delivery WHERE message_id = ?",
+        )
+          .bind(id)
+          .first<{ status: string; attempts: number; last_error: string | null }>(),
+      )
+      .toEqual({ status: "injected", attempts: 0, last_error: null });
+    await Promise.all([closeSocket(alpha), closeSocket(beta)]);
+  });
+
+  it("keeps retryable delivery failures on exponential backoff", async () => {
+    const cookie = await signUp();
+    const alphaCredentials = await enrollHost(cookie, "alpha");
+    const betaCredentials = await enrollHost(cookie, "beta");
+    const alpha = await connectDaemon(alphaCredentials, "alice");
+    const beta = await connectDaemon(betaCredentials, "bob");
+    const betaHub = env.HOST_HUB.getByName(`org:${betaCredentials.org}:host:beta`);
+    const id = "tx_1a1b1c1d1e1f";
+    const firstDelivery = nextFrame(beta);
+    const sent = sendAndRead(alpha, {
+      t: "send",
+      id,
+      from: "alice@alpha",
+      to: "bob@beta",
+      body: "retry normally",
+      ts: new Date().toISOString(),
+    });
+    expect(await sent).toEqual({ t: "send_ack", id });
+    await firstDelivery;
+    const beforeNak = Date.now();
+    beta.send(
+      JSON.stringify({
+        t: "deliver_nak",
+        id,
+        agent: "bob",
+        code: "agent_prompt_failed",
+        retryable: true,
+      }),
+    );
+    await flushSocket(beta, "normal-retry-nak");
+    const retried = await queuedDelivery(betaHub);
+    expect(retried.item).toMatchObject({ attempts: 1, lastError: "agent_prompt_failed" });
+    expect(retried.alarm).toBeGreaterThanOrEqual(beforeNak + 4_500);
+    expect(retried.alarm).toBeLessThanOrEqual(beforeNak + 5_500);
     await Promise.all([closeSocket(alpha), closeSocket(beta)]);
   });
 });

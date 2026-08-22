@@ -12,6 +12,7 @@ async function operatorAndTarget(email: string) {
   });
   const cookie = signup.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
   const session = await signup.json<{ user: { id: string } }>();
+
   const hostID = "hst_aaaaaaaaaaaa";
   await env.DB.batch([
     env.DB.prepare(

@@ -18,7 +18,6 @@ import troubleshootingMarkdown from "../docs/troubleshooting.md";
 import uiMarkdown from "../docs/ui.md";
 import { CONNECTORS } from "./connectors/registry";
 import { type AuthPluginFactory, auth, noAuthPlugins } from "./lib/better-auth";
-import { type Entitlements, unmetered } from "./lib/entitlements";
 
 import {
   AddressError,
@@ -52,14 +51,17 @@ import { Room } from "./do/room";
 import { Integration } from "./do/integration";
 
 /**
- * Deployment-supplied behavior reaches the handlers below as request
- * variables, set once by the middleware `createApp()` installs. Handlers stay
+ * Deployment-supplied behavior reaches the handlers below as a request
+ * variable, set once by the middleware `createApp()` installs. Handlers stay
  * identical across distributions; only what `createApp()` is given differs.
+ *
+ * Message allowances are NOT here — they are enforced inside the Durable
+ * Objects, where the count lives, through the overridable `canAcceptMessage`
+ * seam on `HostHub` and `Room`.
  */
 type TransitEnv = {
   Bindings: Env;
   Variables: {
-    entitlements: Entitlements;
     authPlugins: AuthPluginFactory;
   };
 };
@@ -148,7 +150,7 @@ const publicDocs = [
   {
     slug: "self-hosting",
     title: "Self-hosting Transit",
-    description: "Advanced: run your own Transit Worker instead of the hosted service.",
+    description: "Run the open-source Transit server on your own Cloudflare account.",
     section: "advanced",
     markdown: selfHostingMarkdown,
   },
@@ -485,6 +487,7 @@ app.delete("/api/organization-connections/:id", async (context) => {
   return context.json({ deleted: true, connection: context.req.param("id") });
 });
 
+
 app.post("/api/hosts/enroll", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
@@ -509,8 +512,7 @@ app.post("/api/hosts/enroll", async (context) => {
     return context.json({ error: "host_exists" }, 409);
   }
 
-  const denial = await context.get("entitlements").hostDenial(context.env, org);
-  if (denial) return context.json({ error: "plan_limit", ...denial }, 402);
+
 
   const code = enrollCode();
   const codeHash = await sha256hex(code);
@@ -869,10 +871,12 @@ app.post("/api/rooms/:name/post", async (context) => {
   if (!body || typeof body.body !== "string") {
     return context.json({ error: "body is required" }, 400);
   }
+  const room = context.env.ROOM.getByName(
+    `org:${org}:room:${context.req.param("name")}`,
+  );
+  if (!(await room.canPost())) return context.json({ error: "plan_limit" }, 402);
   try {
-    const message = await context.env.ROOM.getByName(
-      `org:${org}:room:${context.req.param("name")}`,
-    ).post(
+    const message = await room.post(
       "operator@transit",
       body.body,
       typeof body.reply_to === "string" ? body.reply_to : undefined,
@@ -880,7 +884,8 @@ app.post("/api/rooms/:name/post", async (context) => {
     return context.json({ message }, 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : "room_error";
-    return context.json({ error: message }, message === "body_too_large" ? 413 : 404);
+    const status = message === "body_too_large" ? 413 : message === "plan_limit" ? 402 : 404;
+    return context.json({ error: message }, status);
   }
 });
 
@@ -965,10 +970,7 @@ app.post("/api/integrations", async (context) => {
   ) {
     return context.json({ error: "invalid integration" }, 400);
   }
-  const denial = await context
-    .get("entitlements")
-    .integrationDenial(context.env, org);
-  if (denial) return context.json({ error: "plan_limit", ...denial }, 402);
+
 
   try {
     if (!(await targetExists(context, org, body.target_addr))) {
@@ -1632,6 +1634,9 @@ app.post("/ingest/:source", async (context) => {
     if (result.status === "rate_limited") {
       return context.json({ error: "rate_limited" }, 429);
     }
+    if (result.status === "plan_limit") {
+      return context.json({ error: "plan_limit" }, 402);
+    }
     return context.json(
       {
         status: result.status,
@@ -1695,8 +1700,6 @@ app.get("/api/ui/ws", async (context) => {
 });
 
 export type AppOptions = {
-  /** Defaults to {@link unmetered}: no plan limits of any kind. */
-  entitlements?: Entitlements;
   /** Extra Better Auth plugins, e.g. a subscription plugin. Defaults to none. */
   authPlugins?: AuthPluginFactory;
 };
@@ -1707,11 +1710,9 @@ export type AppOptions = {
  * additional routes on the returned instance.
  */
 export function createApp(options: AppOptions = {}) {
-  const entitlements = options.entitlements ?? unmetered;
   const authPlugins = options.authPlugins ?? noAuthPlugins;
   const root = new Hono<TransitEnv>();
   root.use("*", async (context, next) => {
-    context.set("entitlements", entitlements);
     context.set("authPlugins", authPlugins);
     await next();
   });

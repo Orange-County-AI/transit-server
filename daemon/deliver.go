@@ -3,108 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"slices"
 	"strings"
 	"time"
 )
 
-type ComposerState int
-
-const (
-	ComposerUnknown ComposerState = iota
-	ComposerEmpty
-	ComposerDraft
-)
-
-func DetectComposer(agentKind, screen string) ComposerState {
-	if strings.TrimSpace(screen) == "" {
-		return ComposerUnknown
-	}
-	switch strings.ToLower(strings.TrimSpace(agentKind)) {
-	case "omp", "pi":
-		return detectOMPComposer(screen)
-	case "claude":
-		return detectClaudeComposer(screen)
-	default:
-		return ComposerUnknown
-	}
-}
-
-func detectOMPComposer(screen string) ComposerState {
-	lines := strings.Split(screen, "\n")
-	for index := len(lines) - 1; index >= 0; index-- {
-		trimmed := strings.TrimRight(lines[index], " \t\r")
-		interior, ok := strings.CutPrefix(trimmed, "╰─")
-		if !ok {
-			continue
-		}
-		interior, ok = strings.CutSuffix(interior, "─╯")
-		if !ok || !strings.HasPrefix(interior, " ") {
-			continue
-		}
-		if strings.TrimSpace(interior) != "" {
-			return ComposerDraft
-		}
-		for above := index - 1; above >= 0; above-- {
-			body := strings.TrimRight(lines[above], " \t\r")
-			body, ok = strings.CutPrefix(body, "│")
-			if !ok {
-				break
-			}
-			body, ok = strings.CutSuffix(body, "│")
-			if !ok {
-				break
-			}
-			if strings.TrimSpace(body) != "" {
-				return ComposerDraft
-			}
-		}
-		return ComposerEmpty
-	}
-	return ComposerUnknown
-}
-
-func detectClaudeComposer(screen string) ComposerState {
-	lines := strings.Split(screen, "\n")
-	for index := len(lines) - 1; index >= 1; index-- {
-		text, ok := strings.CutPrefix(strings.TrimSpace(lines[index]), "❯")
-		if !ok || !claudeComposerRule(lines[index-1]) {
-			continue
-		}
-		if strings.TrimSpace(text) != "" {
-			return ComposerDraft
-		}
-		for below := index + 1; below < len(lines); below++ {
-			row := strings.TrimSpace(lines[below])
-			if claudeComposerRule(row) {
-				break
-			}
-			if row != "" {
-				return ComposerDraft
-			}
-		}
-		return ComposerEmpty
-	}
-	return ComposerUnknown
-}
-
-func claudeComposerRule(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	if len([]rune(trimmed)) < 8 {
-		return false
-	}
-	for _, glyph := range trimmed {
-		if glyph != '─' {
-			return false
-		}
-	}
-	return true
-}
-
-func draftGuardEnabled() bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv("TRANSIT_DRAFT_GUARD")))
-	return value != "0" && value != "false"
-}
+// holdPollInterval is how often a held pane is re-read. It is only paid while
+// something is actually held, and only against the local Herdr socket.
+const holdPollInterval = 2 * time.Second
 
 // deliver coalesces concurrent delivery attempts of the same message to the
 // same agent. The Worker retries a queued entry on a backoff that starts
@@ -151,7 +57,7 @@ type deliveryFlight struct {
 }
 
 func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string, retryable bool, err error) {
-	if strings.HasPrefix(frame.ID, "tx_") && d.store.HistoryExists(frame.ID) {
+	if strings.HasPrefix(frame.ID, "tx_") && d.store.IncomingRecorded(frame.ID) {
 		return "", false, nil
 	}
 	d.mu.RLock()
@@ -187,21 +93,12 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 	}
 
 	if draftGuardEnabled() {
-		screen, screenErr := d.herdr.PaneScreen(ctx, agent.PaneID)
-		if screenErr == nil && DetectComposer(agent.Kind, screen) == ComposerDraft {
-			d.mu.Lock()
-			firstHold := !d.holds[agent.PaneID]
-			d.holds[agent.PaneID] = true
-			d.mu.Unlock()
-			if firstHold {
-				_ = d.herdr.Notify(ctx, "transit: message waiting", "delivery held until your composer is clear")
-			}
-			return "draft_busy", true, fmt.Errorf("agent composer is not empty")
+		if hold, held := d.composerHold(ctx, agent, frame.Envelope); held {
+			d.applyDraftHold(ctx, hold)
+			return "draft_busy", true, fmt.Errorf("%s has unsent input in pane %s", hold.Agent, hold.PaneID)
 		}
 	}
-	d.mu.Lock()
-	delete(d.holds, agent.PaneID)
-	d.mu.Unlock()
+	d.releaseDraftHold(agent.PaneID)
 
 	before := agent.StateChangeSeq
 	result := d.herdr.PromptAgent(ctx, agent.Name, frame.Envelope, promptTimeout)
@@ -225,6 +122,110 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 		message = "agent prompt failed"
 	}
 	return deliveryFailureCode(result), true, fmt.Errorf("%s", message)
+}
+
+// composerHold reports unsent human input in the target pane. The envelope is
+// part of the question: a delivery whose own paste is still sitting unsent in
+// the composer — a stall the recovery Enter did not clear — must not be held
+// behind itself forever.
+func (d *Daemon) composerHold(ctx context.Context, agent HerdrAgent, envelope string) (draftHold, bool) {
+	screen, err := d.herdr.PaneScreen(ctx, agent.PaneID)
+	if err != nil {
+		return draftHold{}, false
+	}
+	content, located := composerContent(agent.Kind, screen)
+	if !located || strings.TrimSpace(content) == "" {
+		return draftHold{}, false
+	}
+	if composerHoldsOnlyPaste(content, envelope) {
+		return draftHold{}, false
+	}
+	return draftHold{PaneID: agent.PaneID, Agent: agent.Kind, At: time.Now().UTC()}, true
+}
+
+// applyDraftHold records the hold and says so once per pane: a held delivery is
+// invisible otherwise, and the person whose draft caused it is the only one who
+// can release it.
+func (d *Daemon) applyDraftHold(ctx context.Context, hold draftHold) {
+	d.mu.Lock()
+	_, alreadyHeld := d.holds[hold.PaneID]
+	d.holds[hold.PaneID] = hold
+	d.mu.Unlock()
+	if alreadyHeld {
+		return
+	}
+	d.logf("delivery held — %s has unsent input in pane %s; retrying until the composer is clear",
+		hold.Agent, hold.PaneID)
+	_ = d.herdr.Notify(ctx, "transit: message waiting", "delivery held until your composer is clear")
+}
+
+func (d *Daemon) releaseDraftHold(paneID string) {
+	d.mu.Lock()
+	delete(d.holds, paneID)
+	d.mu.Unlock()
+}
+
+// holdLoop ends a hold from the side that can see it. A held delivery stays
+// queued in its HostHub, and every Worker-side retry costs one of that host's
+// 120 alarms per hour, so polling the composer from the Worker is either slow
+// or ruinous — a host whose budget is spent stops retrying every delivery
+// until the hour turns over. Reading the pane locally is free, and a roster
+// snapshot makes the HostHub dispatch immediately, so the message lands within
+// seconds of the composer clearing and the Worker's own retry alarm stays a
+// backstop.
+func (d *Daemon) holdLoop(ctx context.Context) {
+	ticker := time.NewTicker(holdPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if !d.releaseClearedHolds(ctx) {
+			continue
+		}
+		if err := d.sendRoster(ctx); err != nil {
+			d.logf("nudge after a released hold: %v", err)
+		}
+	}
+}
+
+// releaseClearedHolds reports whether any pane stopped holding, which is the
+// only reason to nudge the Worker.
+func (d *Daemon) releaseClearedHolds(ctx context.Context) bool {
+	released := false
+	for _, hold := range d.draftHolds() {
+		if d.holdStillStands(ctx, hold) {
+			continue
+		}
+		d.releaseDraftHold(hold.PaneID)
+		released = true
+	}
+	return released
+}
+
+// holdStillStands re-reads a held pane. A cleared or unreadable composer
+// releases the hold: the delivery attempt that follows judges the pane again,
+// with the envelope in hand, and it is the authority.
+func (d *Daemon) holdStillStands(ctx context.Context, hold draftHold) bool {
+	screen, err := d.herdr.PaneScreen(ctx, hold.PaneID)
+	if err != nil {
+		return false
+	}
+	content, located := composerContent(hold.Agent, screen)
+	return located && strings.TrimSpace(content) != ""
+}
+
+func (d *Daemon) draftHolds() []draftHold {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	holds := make([]draftHold, 0, len(d.holds))
+	for _, hold := range d.holds {
+		holds = append(holds, hold)
+	}
+	slices.SortFunc(holds, func(a, b draftHold) int { return strings.Compare(a.PaneID, b.PaneID) })
+	return holds
 }
 
 func deliveryFailureCode(result PromptResult) string {

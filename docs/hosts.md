@@ -17,7 +17,7 @@ Every host needs the `transit` daemon. How you install it depends on whether the
 Transit ships a Herdr plugin, so it installs the way every other Herdr plugin does. Herdr 0.8.2 or newer is required.
 
 ```bash
-herdr plugin install Orange-County-AI/transit/daemon/plugin
+herdr plugin install Orange-County-AI/transit-server/daemon/plugin
 ```
 
 Herdr clones the repository, previews the manifest and the commands it will run, then runs the plugin's build step. That step compiles the daemon and copies it to `~/.local/bin/transit`, so a single command gives you the daemon, the CLI, and the plugin's inbox pane and actions. Because the build compiles Go, the host needs `go` on `PATH`; Herdr aborts the install and prints the build output if it is missing.
@@ -25,7 +25,7 @@ Herdr clones the repository, previews the manifest and the commands it will run,
 Use `--yes` for a non-interactive install and `--ref` to pin a revision:
 
 ```bash
-herdr plugin install Orange-County-AI/transit/daemon/plugin --ref v0.1.0 --yes
+herdr plugin install Orange-County-AI/transit-server/daemon/plugin --ref v0.1.0 --yes
 ```
 
 Confirm the plugin and the binary:
@@ -42,8 +42,8 @@ transit version
 Claude Code, OMP, Pi, and OpenCode deliver through native adapters, so a host serving only those harnesses does not need Herdr at all. Build the daemon from source, then install the adapter for your harness as described in [Native harness adapters and Herdr](harnesses.md):
 
 ```bash
-git clone https://github.com/Orange-County-AI/transit.git
-cd transit && mise install && bun install
+git clone https://github.com/Orange-County-AI/transit-server.git
+cd transit-server && mise trust && mise install && mise run install
 mise run daemon:build
 install -m 0755 daemon/transit ~/.local/bin/transit
 ```
@@ -66,7 +66,7 @@ transit enroll \
 
 For a self-hosted server, create the code with authenticated `POST /api/hosts/enroll`, then substitute its origin in `--url`. `TRANSIT_URL` supplies the enrollment default when `--url` is omitted. The [self-hosting guide](self-hosting.md) has a complete cookie-authenticated request.
 
-The code is single-use and valid for 15 minutes. `transit enroll` exchanges it for a 32-byte device token and writes the host configuration. Hosted enrollment can be subject to a plan limit; self-hosted servers have no plan limits.
+The code is single-use and valid for 15 minutes. `transit enroll` exchanges it for a 32-byte device token and writes the host configuration. Neither the hosted service nor a self-hosted server caps how many hosts you enroll.
 
 ## Local files and credentials
 
@@ -128,13 +128,13 @@ Herdr is only one of the delivery adapters. Claude Code, OMP, Pi, and OpenCode r
 
 You do not need this if you installed the Herdr plugin. It is the path for developing on Transit itself, for a host where you would rather not let Herdr run a build, and for a host that runs no Herdr at all.
 
-The daemon module requires Go 1.26; `mise.toml` pins Bun and Node, but not Go. `mise run daemon:build` writes `daemon/transit`, which is the same path the plugin's runtime commands use, so a locally linked plugin works after a build:
+The daemon module requires Go 1.26, which `mise.toml` pins alongside Bun and Node. `mise run daemon:build` writes `daemon/transit`, which is the same path the plugin's runtime commands use, so a locally linked plugin works after a build:
 
 ```bash
-git clone https://github.com/Orange-County-AI/transit.git
-cd transit
-mise install
-bun install
+git clone https://github.com/Orange-County-AI/transit-server.git
+cd transit-server
+mise trust && mise install
+mise run install
 mise run daemon:build
 install -m 0755 daemon/transit ~/.local/bin/transit
 herdr plugin link "$PWD/daemon/plugin"
@@ -165,7 +165,7 @@ A `connected: true` status means this daemon has an active authenticated WebSock
 Reinstall the plugin. Herdr replaces the managed checkout, reruns the build, and refreshes both `../transit` and `~/.local/bin/transit`:
 
 ```bash
-herdr plugin install Orange-County-AI/transit/daemon/plugin --yes
+herdr plugin install Orange-County-AI/transit-server/daemon/plugin --yes
 transit version
 transit status
 ```

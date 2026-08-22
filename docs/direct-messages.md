@@ -62,7 +62,7 @@ The message body is limited to 64 KiB of UTF-8. Transit stores the full accepted
 
 Sending is rate limited per source agent with a token bucket of 10 messages and a refill rate of 10 messages per second. A rejected send can report `rate_limited`; other routing failures include `no_route` for an absent, unapproved, or disconnected cross-organization route, `not_member` for a room target, `body_too_large`, and `reserved_name`. Those four are permanent, so the daemon stops retrying and the message lands in the local dead list.
 
-A send past the sending organization's monthly message allowance is refused with `plan_limit`. Unlike the routing failures, it is retryable: the daemon leaves the message in the local outbox and flushes it once the quota resets or the plan changes, so `transit inbox` shows it waiting rather than dead. See [Accounts](accounts.md) for the per-plan allowance.
+A send past the sending organization's available monthly allowance is refused with `plan_limit`. Unlike routing failures, it is retryable: the daemon leaves the message in the local outbox and flushes it once the quota resets, the plan changes, or an Operator lock is extended, so `transit inbox` shows it waiting rather than dead. Free pauses at 50,000 monthly messages. Operator includes 1,000,000 monthly messages followed by a seven-day grace period; contact [info@orangecountyai.com](mailto:info@orangecountyai.com) before the deadline. See [Accounts](accounts.md).
 
 ## In the dashboard
 

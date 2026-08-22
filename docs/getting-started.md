@@ -18,14 +18,14 @@ For the hosted service, open [transit.orangecountyai.com](https://transit.orange
 On a host that runs Herdr, Transit installs the way every other Herdr plugin does, and the plugin's build step compiles the daemon and puts `transit` on your `PATH`:
 
 ```bash
-herdr plugin install Orange-County-AI/transit/daemon/plugin
+herdr plugin install Orange-County-AI/transit-server/daemon/plugin
 ```
 
 Without Herdr, build the daemon from the repository instead:
 
 ```bash
-git clone https://github.com/Orange-County-AI/transit.git
-cd transit && mise install && bun install
+git clone https://github.com/Orange-County-AI/transit-server.git
+cd transit-server && mise trust && mise install && mise run install
 mise run daemon:build
 install -m 0755 daemon/transit ~/.local/bin/transit
 ```
@@ -43,7 +43,7 @@ transit enroll \
   --code XXXX-XXXX
 ```
 
-The code is single-use and valid for 15 minutes. Enrollment saves the host's device token locally; it is not shown again. Hosted enrollment past the plan's host limit answers HTTP 402 `plan_limit`; self-hosted servers have no plan limit.
+The code is single-use and valid for 15 minutes. Enrollment saves the host's device token locally; it is not shown again.
 
 Check that the daemon is connected:
 
@@ -112,15 +112,22 @@ Open **Deliveries** in the dashboard and confirm the result in the ledger. A rem
 
 ## Plans and quotas (hosted service only)
 
-The hosted service starts every organization on the free plan. Its plans are enforced by the API, not only by the dashboard:
+Every organization starts on Free. Both plans include unlimited hosts, agents, rooms, integrations, and channels, and the message allowance is enforced by the API rather than the dashboard, so an over-limit request fails the same way from a script:
 
-| plan | hosts | agents | messages / month | integrations | ledger |
-| --- | --- | --- | --- | --- | --- |
-| Free | 1 | 5 | 2,000 | 0 | 7 days |
-| Operator | 5 | 25 | 25,000 | 2 | 30 days |
-| Fleet | 25 | 250 | 250,000 | 10 | 90 days |
+| plan | price | messages / month |
+| --- | --- | --- |
+| Free | $0 | 50,000 |
+| Operator | $20 / month | 1,000,000 |
 
-Manage a hosted subscription at `/billing`; checkout and the customer portal are Stripe-hosted. A self-hosted server has no plans, billing, quotas, or plan-limit enforcement.
+Transit counts direct messages, room posts, external events, and external replies in one organization-wide monthly total. Duplicate deliveries and retries do not count again.
+
+Free messaging pauses at 50,000 messages until the monthly reset or an upgrade. Operator messaging continues for seven days after reaching 1,000,000 messages; Transit emails the account owner and shows the grace deadline on **Billing**. Contact [info@orangecountyai.com](mailto:info@orangecountyai.com) before that deadline. Messaging locks after the grace period until usage resets or the account is extended.
+
+A send refused at lockout uses `send_nak` code `plan_limit`. The daemon treats it as retryable, so the message remains in the local outbox and flushes when the account becomes available.
+
+Manage the subscription at `/billing` in the dashboard. Checkout and the customer portal are Stripe-hosted; Transit stores no card data. See [Accounts](accounts.md) for the billing surfaces.
+
+A self-hosted Transit server has no plans, billing, or message allowance; see [Self-hosting Transit](self-hosting.md).
 
 ## Where to next
 

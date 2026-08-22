@@ -15,7 +15,7 @@
  * throwing. A present-but-failing send still throws, so Better Auth logs real
  * delivery failures.
  */
-const DEFAULT_FROM = "noreply@example.com";
+const DEFAULT_FROM = "noreply@mail.orangecountyai.com";
 
 type ResetEmailInput = {
   to: string;

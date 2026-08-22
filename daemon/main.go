@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -120,12 +121,13 @@ func runDaemon(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var wait sync.WaitGroup
-	wait.Add(5)
+	wait.Add(6)
 	go func() { defer wait.Done(); _ = serveIPC(ctx, listener, daemon) }()
 	go func() { defer wait.Done(); _ = serveAgentSocket(ctx, agentListener, daemon) }()
 	go func() { defer wait.Done(); daemon.wireLoop(ctx) }()
 	go func() { defer wait.Done(); daemon.rosterLoop(ctx) }()
 	go func() { defer wait.Done(); daemon.outboxLoop(ctx) }()
+	go func() { defer wait.Done(); daemon.holdLoop(ctx) }()
 	<-ctx.Done()
 	listener.Close()
 	agentListener.Close()
@@ -195,7 +197,24 @@ func runStatus(args []string) error {
 	fmt.Printf("host: %v\nconnected: %v\npaused: %v\nagents: %v\noutbox: %v\ndead: %v\nlast error: %v\n",
 		response["host"], response["connected"], response["paused"], response["agents"],
 		response["outbox"], response["dead"], response["last_error"])
+	for _, hold := range draftHoldRows(response) {
+		fmt.Printf("holding %s since %s\n", hold.PaneID, hold.At.Format(time.RFC3339))
+	}
 	return nil
+}
+
+// draftHoldRows decodes the holds an IPC response carries. A malformed or
+// absent list prints nothing rather than failing a status read.
+func draftHoldRows(response map[string]any) []draftHold {
+	raw, err := json.Marshal(response["draft_holds"])
+	if err != nil {
+		return nil
+	}
+	var holds []draftHold
+	if err := json.Unmarshal(raw, &holds); err != nil {
+		return nil
+	}
+	return holds
 }
 
 func startDetachedDaemon() error {
@@ -242,6 +261,13 @@ func runInbox(args []string) error {
 		outbox, _ := response["outbox"].([]any)
 		dead, _ := response["dead"].([]any)
 		fmt.Printf("TRANSIT INBOX\n\nOUTBOX  %d\nDEAD    %d\n", len(outbox), len(dead))
+		if holds := draftHoldRows(response); len(holds) > 0 {
+			fmt.Print("\nHELD\n")
+			for _, hold := range holds {
+				fmt.Printf("  %s (%s) since %s — clear your composer and it delivers on its own\n",
+					hold.PaneID, hold.Agent, hold.At.Format(time.RFC3339))
+			}
+		}
 		if !*watch {
 			return nil
 		}

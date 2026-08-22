@@ -15,7 +15,7 @@ Secret fields are write-only. After saving, Transit displays only a `sha256:` fi
 
 A Telegram configuration must allow at least one user ID or chat ID before it accepts events. Pausing an integration stops its connector; resuming it restarts the connector and dispatches due deliveries. Deleting an integration permanently removes connector state and its unsettled ledger.
 
-Integrations are the one resource the free plan does not include: it allows zero, Operator allows two, and Fleet allows ten. Creating one past your allowance answers HTTP 402 with `{"error":"plan_limit","limit":"integrations","plan":"free","allowed":0}`. A plan change never deletes an integration you already have, so a lapsed plan leaves existing ones running and only blocks the next create. See [Accounts](accounts.md).
+Both plans include unlimited integrations. Each unique external event and each reply posted back to an external conversation counts toward the organization's combined monthly message allowance. Duplicate events and delivery retries do not count again. See [Accounts](accounts.md).
 
 ## Settle a channel delivery once
 

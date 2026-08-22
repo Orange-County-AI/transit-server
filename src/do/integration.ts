@@ -278,7 +278,7 @@ export class Integration extends DurableObject<Env> {
   async ingestEvent(
     event: ConnectorEvent,
   ): Promise<{
-    status: "queued" | "duplicate" | "rate_limited";
+    status: "queued" | "duplicate" | "rate_limited" | "plan_limit";
     eventId: string;
     deliveryId: string;
   }> {
@@ -289,6 +289,13 @@ export class Integration extends DurableObject<Env> {
       !(await consumeStoredToken(this.ctx.storage, "rate:ingest", 5, 20))
     ) {
       return { status: "rate_limited", eventId: "", deliveryId: "" };
+    }
+    const existing = await this.ctx.storage.get<{ eventId: string; deliveryId: string }>(
+      `event_key:${event.eventKey}`,
+    );
+    if (existing) return { status: "duplicate", ...existing };
+    if (!(await this.canAcceptMessage(meta.org))) {
+      return { status: "plan_limit", eventId: "", deliveryId: "" };
     }
     const committed = await this.ctx.storage.transaction(async (transaction) => {
       const dedupeKey = `event_key:${event.eventKey}`;
@@ -338,7 +345,14 @@ export class Integration extends DurableObject<Env> {
     const connector = connectorFor(meta.connector);
     if (!connector.webhook) return new Response("Connector has no webhook", { status: 404 });
     const config = await this.openConfig(meta);
-    return connector.webhook(await this.connectorContext(connector, config), request);
+    try {
+      return await connector.webhook(await this.connectorContext(connector, config), request);
+    } catch (error) {
+      if (error instanceof Error && error.message === "plan_limit") {
+        return Response.json({ error: "plan_limit" }, { status: 402 });
+      }
+      throw error;
+    }
   }
 
   async readMessage(deliveryId: string, caller: string): Promise<string> {
@@ -389,6 +403,7 @@ export class Integration extends DurableObject<Env> {
     }
 
     const meta = await this.requireMeta();
+    if (!(await this.canAcceptMessage(meta.org))) throw new Error("plan_limit");
     const delivery = await this.requireDelivery(input.deliveryId);
     await this.assertOwner(delivery, input.caller, meta.org);
     const event = await this.requireEvent(delivery.eventId);
@@ -419,7 +434,7 @@ export class Integration extends DurableObject<Env> {
       await transaction.put(`reply:${delivery.id}`, reply);
       await transaction.put(`delivery:${delivery.id}`, delivery);
     });
-    this.mirrorReplyCreated(delivery, reply);
+    this.mirrorReplyCreated(meta, delivery, reply);
 
     try {
       await this.postRecordedReply(meta, event, delivery, reply);
@@ -662,7 +677,9 @@ export class Integration extends DurableObject<Env> {
       },
       ingest: async (event) => {
         const result = await this.ingestEvent(event);
-        if (result.status === "rate_limited") throw new Error("rate_limited");
+        if (result.status === "rate_limited" || result.status === "plan_limit") {
+          throw new Error(result.status);
+        }
         return { status: result.status };
       },
       fetch: (input, init) => fetch(input, init),
@@ -1025,11 +1042,28 @@ export class Integration extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Metering seam — mirrors `HostHub` and `Room`. This distribution accepts
+   * every ingested event and reply; a deployment that meters volume subclasses
+   * `Integration` and overrides both methods together.
+   */
+  protected async canAcceptMessage(_org: string): Promise<boolean> {
+    return true;
+  }
+
+  protected meterMessages(_org: string, _count: number): D1PreparedStatement | null {
+    return null;
+  }
+
   private mirrorIngest(
     meta: IntegrationMeta,
     event: StoredEvent,
     delivery: DeliveryRecord,
   ): void {
+    // A meter statement, when a deployment supplies one, must stay directly
+    // after the event insert: it keys off `changes()` so a replayed event that
+    // the `INSERT OR IGNORE` swallowed is not counted twice.
+    const meter = this.meterMessages(meta.org, 1);
     this.background(
       "integration_ingest_write_failed",
       this.env.DB.batch([
@@ -1048,16 +1082,23 @@ export class Integration extends DurableObject<Env> {
           JSON.stringify(event.meta ?? {}),
           event.receivedAt,
         ),
+        ...(meter ? [meter] : []),
         this.deliveryStatement(delivery),
       ]),
     );
   }
 
-  private mirrorReplyCreated(delivery: DeliveryRecord, reply: ReplyRecord): void {
+  private mirrorReplyCreated(
+    meta: IntegrationMeta,
+    delivery: DeliveryRecord,
+    reply: ReplyRecord,
+  ): void {
+    const meter = this.meterMessages(meta.org, 1);
     this.background(
       "integration_reply_write_failed",
       this.env.DB.batch([
         this.replyStatement(reply),
+        ...(meter ? [meter] : []),
         this.deliveryStatement(delivery),
       ]),
     );
@@ -1105,7 +1146,9 @@ export class Integration extends DurableObject<Env> {
     );
   }
 
-  private background(event: string, promise: Promise<unknown>): void {
+  /** Fire-and-forget with a logged failure. `protected` so a subclass that
+   * overrides the metering seam can report its own background work the same way. */
+  protected background(event: string, promise: Promise<unknown>): void {
     this.ctx.waitUntil(
       promise.catch((error) => {
         console.error(

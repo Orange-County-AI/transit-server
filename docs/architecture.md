@@ -164,10 +164,46 @@ The enrolled origin selects the server: use `transit enroll --url https://<your-
 **Decision — the daemon talks to herdr through its Unix-socket JSON protocol.**
 It accepts protocols 19 and 20, with `TRANSIT_HERDR_PROTOCOL_ALLOW` as the
 explicit override. It uses `agent.list`, `agent.get`, `agent.rename`, and
-`agent.prompt` with `wait`; `pane.read` with `visible` and `strip_ansi` for the
-composer draft guard; `pane.send_keys` for stall recovery; and
-`notification.show`. **Rationale:** Unix-socket control exposes host-local pane
-state without requiring an inbound network service.
+`agent.prompt` with `wait`; `pane.read` with `source=visible` and `strip_ansi`
+before each Herdr-path delivery to protect unsent composer input; `pane.send_keys`
+for stall recovery; and `notification.show`. The draft guard holds a delivery
+only when it positively recognizes a supported composer: an OMP/Pi box footer
+with its wrapped body, or a Claude Code `❯` row fenced by rule lines. A fence's
+trimmed form starts and ends with `─`, contains at least eight `─` glyphs, and
+allows only one space-padded inline label segment, such as a plan name.
+Detection is deliberately one-sided and fail-open: an unfamiliar harness, an
+unlocatable composer, or a failed pane read delivers as it did before the guard,
+because starving a durable queue is worse than the clobber the guard prevents.
+The question is whose text is in the composer, not merely whether text is
+there: a delivery whose own paste is still sitting unsent — a stall the
+recovery `Enter` did not clear — is not held behind itself. **Rationale:**
+Unix-socket control exposes host-local pane state without requiring an inbound
+network service.
+
+**Decision — a held composer is visible, does not spend a delivery attempt, and
+is released by the side that can see it.** The daemon naks a guarded delivery
+with retryable `draft_busy` and the HostHub keeps that entry's attempt count
+unchanged, so a person typing for minutes cannot exhaust the 40-attempt budget.
+The daemon then re-reads the held pane every two seconds and sends a roster
+snapshot the moment the composer clears, which makes the HostHub dispatch
+immediately; the hold's own retry alarm is spaced five minutes out as a
+backstop for a daemon that died still holding. **Rationale:** every HostHub
+alarm is drawn from that host's 120-per-hour budget, and a host that spends it
+stops retrying every queued delivery until the hour turns over, so a
+second-scale composer poll belongs on the free local socket rather than in the
+Worker. `transit status` and `transit inbox` report `draft_holds` entries with
+`pane_id`, `agent`, and `at`; the status command prints `holding <pane_id>
+since <RFC3339>`, and the inbox prints a `HELD` section. On the first hold for
+a pane, the daemon logs `transit: delivery held — <harness> has unsent input in
+pane <pane_id>; retrying until the composer is clear`.
+`TRANSIT_DRAFT_GUARD=0` or `false` disables this protection.
+
+**Decision — stall recovery rechecks the composer before submitting it.** A
+large paste can collapse into an OMP attachment chip and absorb Herdr's submit
+key, producing `agent_prompt_stalled`; before its recovery `Enter`, the daemon
+reads the pane again and refuses to submit when the composer gained content
+other than Transit's own paste. A person who starts typing during that paste
+window therefore does not have their draft submitted.
 
 **Decision — each daemon maintains one outbound WSS connection to the Worker
 using `transit-wire/1`, reconnecting with jittered backoff.** It authenticates
@@ -206,10 +242,14 @@ access to herdr's existing lifecycle surface.
 
 **Decision — Claude Code, OMP, Pi, and OpenCode self-register with the host daemon over
 `transit-agent/1`, a user-owned local socket; Herdr is the fallback for every
-other harness.** Herdr injection means driving a PTY: it needs `herdr.service`,
-scrapes the pane to guess whether a composer is mid-draft, targets a terminal
+other harness.** Herdr injection drives a PTY: it needs `herdr.service`, reads
+the pane to protect a supported composer's unsent draft, targets a terminal
 container rather than a session, and cannot tell a resumed session from a new
-one. Native harnesses can say who they are, so they do.
+one. Native harnesses can identify the session that owns a delivery, avoiding
+those PTY identity failures, but they are not composer-guarded: a native adapter
+registers a harness session rather than a pane, and no harness API exposes
+composer state. A native delivery can therefore steer into the session while a
+person is composing.
 
 The socket is `<data dir>/agent.sock`, mode 0600, newline-delimited JSON,
 persistent and bidirectional — unlike the one-shot `transit.sock` used by the
@@ -236,6 +276,15 @@ the receipt set from the session branch on resume. OpenCode injects through
 delivery id; that persisted user message is its resume receipt. **Rationale:**
 acking before persistence drops a message in the write-to-disk gap;
 at-least-once plus delivery-id dedupe covers the retry.
+
+**Decision — the delivery archive is separate from the outbox archive.**
+Injected deliveries are recorded under `history/in/<id>.json`; the outbox
+records a committed send under `history/<id>.json`, and only the former answers
+the delivery dedupe check. **Rationale:** both ends of a same-host message
+share one daemon and one id, so a single archive let the sender's own record
+satisfy the recipient's dedupe check, and the daemon acknowledged same-host
+deliveries it had never injected. A record written before the split is flat and
+still dedupes, because only an injected delivery carries an envelope.
 
 **Decision — rollout is a three-value mode, `shadow | prefer | require`,
 defaulting to `prefer`.** `shadow` registers and rosters natively while Herdr
@@ -364,11 +413,23 @@ introduced.
 
 **Decision — Transit is one codebase operating in hosted and self-hosted
 deployments, with no mode flag.** The hosted instance is multi-organization; a
-self-hoster runs `wrangler d1 create` and `mise run deploy` as described by the
-repository README and typically uses one personal organization. The same
-organization membership and `org_id` boundary remains active in either case.
-**Rationale:** a shared authorization model avoids divergent runtime behavior
-while allowing a self-hosted deployment to be naturally single-organization.
+self-hoster clones `github.com/Orange-County-AI/transit-server` and runs
+`mise run d1:create` and `mise run deploy` as described by
+[Self-hosting Transit](self-hosting.md), typically using one personal
+organization. The same organization membership and `org_id` boundary remains
+active in either case. **Rationale:** a shared authorization model avoids
+divergent runtime behavior while allowing a self-hosted deployment to be
+naturally single-organization.
+
+**Decision — the commercial layer is a separate Worker that wraps this one,
+not a branch inside it.** Everything in this repository is MIT-licensed and
+enforces no allowance. The hosted service supplies Better Auth's subscription
+plugin through `createApp({ authPlugins })` and subclasses `HostHub` and
+`Room` to override `canAcceptMessage`, `recordAcceptedMessage`, and
+`meterMessages`. **Rationale:** an `if (billingEnforced(env))` branch would
+require the metering code to exist in every build, including the open-source
+one; an override seam keeps the published tree free of it while both
+deployments run the identical request path.
 
 ## Implementation status
 

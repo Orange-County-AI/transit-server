@@ -83,4 +83,67 @@ describe("auth flow", () => {
     const me = await get("/api/me", cookie);
     expect(me.status).toBe(401);
   });
+
+  test("profile details, email, and password can be updated", async () => {
+    const signUp = await post("/api/auth/sign-up/email", creds);
+    expect(signUp.status).toBe(200);
+    const cookie = cookiesFrom(signUp);
+
+    const updateUser = await post(
+      "/api/auth/update-user",
+      { name: "Alice Updated" },
+      cookie,
+    );
+    expect(
+      updateUser.status,
+      `name update failed: ${await updateUser.clone().text()}`,
+    ).toBe(200);
+
+    const updatedEmail = "alice-updated@test.example";
+    const changeEmail = await post(
+      "/api/auth/change-email",
+      { newEmail: updatedEmail },
+      cookie,
+    );
+    expect(
+      changeEmail.status,
+      `email update failed: ${await changeEmail.clone().text()}`,
+    ).toBe(200);
+
+    const updatedPassword = "updated1234!";
+    const changePassword = await post(
+      "/api/auth/change-password",
+      {
+        currentPassword: creds.password,
+        newPassword: updatedPassword,
+        revokeOtherSessions: true,
+      },
+      cookie,
+    );
+    expect(
+      changePassword.status,
+      `password update failed: ${await changePassword.clone().text()}`,
+    ).toBe(200);
+
+    const rotatedCookie = cookiesFrom(changePassword);
+    expect(rotatedCookie).toBeTruthy();
+    const me = await get("/api/me", rotatedCookie);
+    expect(me.status).toBe(200);
+    const body = (await me.json()) as {
+      user: { name: string; email: string };
+    };
+    expect(body.user).toMatchObject({
+      name: "Alice Updated",
+      email: updatedEmail,
+    });
+
+    const signIn = await post("/api/auth/sign-in/email", {
+      email: updatedEmail,
+      password: updatedPassword,
+    });
+    expect(
+      signIn.status,
+      `sign-in after profile update failed: ${await signIn.clone().text()}`,
+    ).toBe(200);
+  });
 });

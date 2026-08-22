@@ -18,6 +18,15 @@ type sendOutcome struct {
 	Err  error
 }
 
+// draftHold is the pane evidence that stopped a delivery: the person had unsent
+// input in the composer, so prompting would have submitted their draft with the
+// envelope. Held deliveries are retried, never dropped.
+type draftHold struct {
+	PaneID string    `json:"pane_id"`
+	Agent  string    `json:"agent"`
+	At     time.Time `json:"at"`
+}
+
 type Daemon struct {
 	cfg   *Config
 	token string
@@ -34,7 +43,7 @@ type Daemon struct {
 	connected     bool
 	lastError     string
 	paused        bool
-	holds         map[string]bool
+	holds         map[string]draftHold
 	inflight      map[string]*deliveryFlight
 	commitWaiters map[string][]chan sendOutcome
 	rpcWaiters    map[string]chan RPCResponse
@@ -49,7 +58,7 @@ type Daemon struct {
 func newDaemon(cfg *Config, token string, store *Store, herdr HerdrDriver) *Daemon {
 	d := &Daemon{
 		cfg: cfg, token: token, store: store, herdr: herdr, started: time.Now(),
-		holds: make(map[string]bool), inflight: make(map[string]*deliveryFlight),
+		holds: make(map[string]draftHold), inflight: make(map[string]*deliveryFlight),
 		commitWaiters: make(map[string][]chan sendOutcome),
 		rpcWaiters:    make(map[string]chan RPCResponse), adapters: make(map[string]*agentAdapter),
 		nativeByName: make(map[string]*agentAdapter), kickRoster: make(chan struct{}, 1),

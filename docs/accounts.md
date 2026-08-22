@@ -6,7 +6,7 @@ Accounts and organizations are Transit identity and tenancy boundaries. This pag
 
 On the hosted sign-up page, select **Create your account** and provide a name, email address, and password. Passwords must contain at least eight characters. Transit creates a personal organization, activates it in the new signed-in session, and opens the workspace. For a self-hosted account, use `POST /api/auth/sign-up/email` as shown in [Self-hosting Transit](self-hosting.md).
 
-Transit does not currently send a sign-up verification email or present an email-confirmation step. Use the email address carefully; it is the address used for password recovery.
+Transit does not currently send a sign-up verification email or present an email-confirmation step. The profile page lets a signed-in account owner replace the email address used for sign-in and password recovery.
 
 ## Sign in
 
@@ -20,6 +20,13 @@ Open `/login` and sign in with your email address and password. The dashboard us
 4. Open the link and choose a new password. Reset links expire after one hour; expired, malformed, and missing links are rejected by the reset page.
 
 Password-reset email is delivered through Cloudflare Email Sending. If you did not request a reset, you can ignore the email; the password does not change until a valid link is used to set a new one.
+
+## Manage your profile
+
+Open **Profile** from the user icon in the application header. The page lets you
+change the name shown on the account, replace the email address used for sign-in
+and password recovery, change the password, or sign out. Changing the password
+keeps the current browser signed in and invalidates every other active session.
 
 ## Organizations
 
@@ -64,17 +71,24 @@ A newly created source secret is shown for copying once. Afterward, secret value
 
 ## Plans and billing (hosted service only)
 
-The hosted service offers these plans. Its limits are enforced by the API, so a script hits the same wall as the dashboard:
+Every organization starts on Free. Hosts, agents, rooms, integrations, and channels are unlimited on both plans. Transit meters only messages, combined across direct messages, room posts, external events, and replies to external conversations, and the limit is enforced by the API rather than by the dashboard, so a script hits the same wall the UI does:
 
-| plan | price | hosts | agents | messages / month | integrations | ledger |
-| --- | --- | --- | --- | --- | --- | --- |
-| Free | $0 | 1 | 5 | 2,000 | 0 | 7 days |
-| Operator | $9 / month or $90 / year | 5 | 25 | 25,000 | 2 | 30 days |
-| Fleet | $29 / month or $290 / year | 25 | 250 | 250,000 | 10 | 90 days |
+| plan | price | messages / month | everything else |
+| --- | --- | --- | --- |
+| Free | $0 | 50,000 | Unlimited |
+| Operator | $20 / month | 1,000,000 | Unlimited |
 
-The hosted **Billing** page at `/billing` and `GET /api/billing` show the active organization's plan, limits, and usage. Checkout and the customer portal are Stripe-hosted through the Better Auth Stripe plugin; only an organization owner or admin can change a subscription, and card data never reaches Transit.
+Free organizations pause when they reach 50,000 messages and resume when the counter resets on the first day of the next month, UTC, or immediately after upgrading.
 
-A self-hosted Transit server has no billing, plans, or plan limits. It does not enforce the hosted table above; see [Self-hosting Transit](self-hosting.md).
+Operator organizations receive a warning email and a persistent Billing-page warning when they reach 1,000,000 messages. Messaging continues for seven days. Contact [info@orangecountyai.com](mailto:info@orangecountyai.com) during that grace period to arrange continued service; new messages are locked after the deadline until the monthly counter resets or the account is extended.
+
+The allowance covers messages accepted from every direction. Duplicate deliveries and retries do not add another count. A refused daemon send uses `send_nak` code `plan_limit`; the daemon keeps it in the local outbox and retries after the account becomes available. A refused signed-ingest request answers HTTP 402 `{"error":"plan_limit"}`.
+
+The **Billing** page at `/billing` shows the active organization's current plan, aggregate message usage, grace deadline, and lock state. `GET /api/billing` returns the same state for scripting.
+
+Checkout and the customer portal are Stripe-hosted through the Better Auth Stripe plugin, at `/api/auth/subscription/upgrade` and `/api/auth/subscription/billing-portal`. Transit passes the active organization as the subscription reference; only an organization owner or admin can change that subscription. Card data never reaches Transit.
+
+A self-hosted Transit server has no billing, plans, or message allowance. None of the above applies to it; see [Self-hosting Transit](self-hosting.md).
 
 ## Legal pages
 

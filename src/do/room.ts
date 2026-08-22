@@ -3,6 +3,7 @@ import { parseAddress } from "../lib/transit/addr";
 import { renderEnvelope } from "../lib/transit/envelope";
 import { txId } from "../lib/transit/ids";
 
+
 const MAX_ROOM_MEMBERS = 64;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const ROOM_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -163,6 +164,11 @@ export class Room extends DurableObject<Env> {
     return { left: true };
   }
 
+  async canPost(): Promise<boolean> {
+    const config = await this.requireConfig();
+    return this.canAcceptMessage(config.org);
+  }
+
   async post(
     from: string,
     body: string,
@@ -176,6 +182,16 @@ export class Room extends DurableObject<Env> {
     if (from !== "operator@transit" && !(await this.hasMember(from))) {
       throw new Error("not_member");
     }
+    if (messageId) {
+      const existingSequence = await this.ctx.storage.get<number>(`message_id:${messageId}`);
+      if (existingSequence !== undefined) {
+        const existing = await this.ctx.storage.get<RoomEntry>(
+          `message:${String(existingSequence).padStart(16, "0")}`,
+        );
+        if (existing) return existing;
+      }
+    }
+    if (!(await this.canAcceptMessage(config.org))) throw new Error("plan_limit");
 
     const committed = await this.ctx.storage.transaction(async (transaction) => {
       const id = messageId ?? txId();
@@ -313,6 +329,16 @@ export class Room extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Metering seam. This distribution accepts every post; a deployment that
+   * meters volume subclasses `Room` and overrides this together with
+   * {@link meterMessages}. `post()` throws `plan_limit` when it returns false,
+   * and `canPost()` lets a caller check before composing.
+   */
+  protected async canAcceptMessage(_org: string): Promise<boolean> {
+    return true;
+  }
+
   private async config(): Promise<RoomConfig | null> {
     return (await this.ctx.storage.get<RoomConfig>("config")) ?? null;
   }
@@ -396,7 +422,9 @@ export class Room extends DurableObject<Env> {
     }
   }
 
-  private background(event: string, promise: Promise<unknown>): void {
+  /** Fire-and-forget with a logged failure. `protected` so a subclass that
+   * overrides the metering seam can report its own background work the same way. */
+  protected background(event: string, promise: Promise<unknown>): void {
     this.ctx.waitUntil(
       promise.catch((error) => {
         console.error(

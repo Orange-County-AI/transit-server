@@ -44,6 +44,6 @@ Transit treats the ledger as a time-bounded operational record:
 
 The Worker runs a daily retention sweep. A displayed row can disappear after its applicable retention period, so copy the ID and diagnostic detail into the owning system when you need a longer-lived incident record.
 
-These are the windows the sweep applies today, on every plan. Plans also advertise a per-plan ledger allowance — 7, 30, or 90 days, listed under [Accounts](accounts.md) — which the sweep does not yet read; do not assume a paid plan currently keeps a row longer than the table above.
+These are the windows the sweep applies to every account.
 
 See [Direct messages](direct-messages.md), [Rooms](rooms.md), and [Integrations](integrations.md) for the behavior that creates these rows.

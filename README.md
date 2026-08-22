@@ -53,6 +53,7 @@ The daemon stores state in `~/.local/share/transit` and configuration in `~/.con
 | `TRANSIT_CONFIG` | Configuration file path. |
 | `TRANSIT_HERDR_SOCKET` | Herdr Unix socket path. |
 | `TRANSIT_URL` | Default server origin used by `transit enroll` when `--url` is omitted. |
+| `TRANSIT_DRAFT_GUARD` | Set to `0` or `false` to disable the Herdr composer draft guard. |
 
 Enrollment persists the selected server origin. See [Hosts and the daemon](docs/hosts.md), [Agent skill](docs/agent-skill.md), and [Troubleshooting](docs/troubleshooting.md) for host operation.
 

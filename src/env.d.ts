@@ -11,6 +11,7 @@ interface Env {
   BETTER_AUTH_SECRET: string;
   TRANSIT_MASTER_KEY: string;
   BETTER_AUTH_TRUSTED_ORIGINS?: string;
+
 }
 
 declare namespace Cloudflare {
@@ -18,5 +19,6 @@ declare namespace Cloudflare {
     BETTER_AUTH_SECRET: string;
     TRANSIT_MASTER_KEY: string;
     BETTER_AUTH_TRUSTED_ORIGINS?: string;
+
   }
 }
