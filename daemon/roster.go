@@ -126,7 +126,8 @@ func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
 		wireAgents = append(wireAgents, WireAgent{
 			Name: adapter.name, Kind: adapter.harness,
 			PaneID: "native:" + adapter.harness + ":" + firstSessionID(adapter.sessionID),
-			Status: adapter.status, CWD: adapter.cwd, Title: adapter.title, NamedBy: adapter.namedBy,
+			Status: adapter.status, CWD: adapter.cwd, Title: adapter.title,
+			NamedBy: wireNamedBy(adapter.namedBy),
 		})
 	}
 	sort.Slice(wireAgents, func(i, j int) bool { return wireAgents[i].Name < wireAgents[j].Name })
@@ -140,6 +141,18 @@ func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
 	d.rosterHash = hash
 	d.mu.Unlock()
 	return changed, nil
+}
+
+// wireNamedBy keeps an internal provenance out of the roster frame.
+// `transit-wire/1` admits `user` and `auto` and the Worker closes 4002 on
+// anything else, so the `herdr` value a native adapter records when it adopts
+// its pane name — a name a person chose in Herdr — travels as `user`. Adopting
+// a pane name must not cost a host its entire wire connection.
+func wireNamedBy(namedBy string) string {
+	if namedBy == "auto" {
+		return "auto"
+	}
+	return "user"
 }
 
 func firstSessionID(sessionID string) string {
