@@ -28,6 +28,7 @@ type agentFrame struct {
 	Proto      int    `json:"proto,omitempty"`
 	Harness    string `json:"harness,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
+	PaneID     string `json:"pane_id,omitempty"`
 	PID        int    `json:"pid,omitempty"`
 	CWD        string `json:"cwd,omitempty"`
 	Title      string `json:"title,omitempty"`
@@ -454,6 +455,7 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 		return nil, "invalid_session", "session_id is required"
 	}
 	key := frame.Harness + ":" + frame.SessionID
+	paneAgent, hasPaneAgent := d.localAgentByPane(frame.PaneID)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -473,22 +475,38 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 		hasName = true
 	}
 	if !hasName {
-		taken := make(map[string]bool, len(d.nativeNames)+len(d.herdrAgents))
-		for otherKey, other := range d.nativeNames {
-			if otherKey != key && other.Name != "" {
-				taken[other.Name] = true
+		adopted := false
+		if hasPaneAgent && paneAgent.Name != "" {
+			claimed := false
+			for otherKey, other := range d.nativeNames {
+				if otherKey != key && other.Name == paneAgent.Name {
+					claimed = true
+					break
+				}
+			}
+			if !claimed {
+				nameRecord = nativeName{Name: paneAgent.Name, NamedBy: "herdr"}
+				adopted = true
 			}
 		}
-		for _, agent := range d.herdrAgents {
-			if agent.Name != "" {
-				taken[agent.Name] = true
+		if !adopted {
+			taken := make(map[string]bool, len(d.nativeNames)+len(d.herdrAgents))
+			for otherKey, other := range d.nativeNames {
+				if otherKey != key && other.Name != "" {
+					taken[other.Name] = true
+				}
 			}
+			for _, agent := range d.herdrAgents {
+				if agent.Name != "" {
+					taken[agent.Name] = true
+				}
+			}
+			name, err := generateAutoName(frame.Harness, taken)
+			if err != nil {
+				return nil, "name_allocation_failed", err.Error()
+			}
+			nameRecord = nativeName{Name: name, NamedBy: "auto"}
 		}
-		name, err := generateAutoName(frame.Harness, taken)
-		if err != nil {
-			return nil, "name_allocation_failed", err.Error()
-		}
-		nameRecord = nativeName{Name: name, NamedBy: "auto"}
 	}
 
 	capability, err := randomCapability()

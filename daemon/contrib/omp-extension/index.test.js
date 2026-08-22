@@ -84,7 +84,7 @@ function createContext(branch = [], withOmpTimers = true) {
 	return context;
 }
 
-async function connectClient({ pi, branch, harness = "omp", withOmpTimers = true } = {}) {
+async function connectClient({ pi, branch, harness = "omp", withOmpTimers = true, env = {} } = {}) {
 	const agent = await createAgentSocket();
 	const client = new TransitClient({
 		pi:
@@ -95,6 +95,7 @@ async function connectClient({ pi, branch, harness = "omp", withOmpTimers = true
 		ctx: createContext(branch, withOmpTimers),
 		harness,
 		socketPath: agent.socketPath,
+		env,
 	});
 	clients.push(client);
 	client.start();
@@ -125,6 +126,16 @@ test("registers the OMP session with the transit-agent/1 shape", async () => {
 		status: "idle",
 	});
 	await register(agent);
+});
+
+test("includes the running Herdr pane only when HERDR_PANE_ID is set", async () => {
+	const withPane = await connectClient({ env: { HERDR_PANE_ID: "titan:pane-1" } });
+	expect(withPane.register.pane_id).toBe("titan:pane-1");
+	await register(withPane.agent);
+
+	const withoutPane = await connectClient({ env: { HERDR_PANE_ID: "  " } });
+	expect(withoutPane.register).not.toHaveProperty("pane_id");
+	await register(withoutPane.agent);
 });
 
 test("registers a standalone Pi session without OMP timer helpers", async () => {

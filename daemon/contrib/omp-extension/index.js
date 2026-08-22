@@ -24,12 +24,16 @@ export function receiptIdsFromBranch(branch) {
 
 // The address this workspace already publishes, if the launcher set one.
 // Empty means "let the daemon choose an auto-name".
-export function agentName() {
+export function agentName(env = process.env) {
 	for (const key of ["TRANSIT_AGENT_NAME", "WORKSPACE_AGENT_NAME"]) {
-		const value = (process.env[key] ?? "").trim();
+		const value = (env[key] ?? "").trim();
 		if (value) return value;
 	}
 	return "";
+}
+
+export function agentPaneID(env = process.env) {
+	return (env.HERDR_PANE_ID ?? "").trim();
 }
 
 function errorCode(error, fallback) {
@@ -45,6 +49,7 @@ export class TransitClient {
 	#pi;
 	#harness;
 	#ctx;
+	#env;
 	#socketPath;
 	#sessionId;
 	#socket;
@@ -61,12 +66,13 @@ export class TransitClient {
 	#inFlight = new Map();
 	#status = "idle";
 
-	constructor({ pi, ctx, harness = "omp", socketPath = agentSocketPath() }) {
+	constructor({ pi, ctx, harness = "omp", socketPath = agentSocketPath(), env = process.env }) {
 		if (harness !== "omp" && harness !== "pi") {
 			throw new Error(`unsupported Transit extension harness: ${harness}`);
 		}
 		this.#pi = pi;
 		this.#ctx = ctx;
+		this.#env = env;
 		this.#harness = harness;
 		this.#socketPath = socketPath;
 		this.#sessionId = ctx.sessionManager.getSessionId();
@@ -109,6 +115,8 @@ export class TransitClient {
 			if (this.#socket !== socket || this.#stopped) return;
 			this.#connected = true;
 			this.#reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+			const name = agentName(this.#env);
+			const paneID = agentPaneID(this.#env);
 			this.#write({
 				t: "register",
 				proto: 1,
@@ -120,7 +128,8 @@ export class TransitClient {
 				// Claim the address this workspace already publishes. Without it
 				// the daemon mints a fresh auto-name and this session registers
 				// alongside its own Herdr entry instead of superseding it.
-				...(agentName() ? { name: agentName() } : {}),
+				...(name ? { name } : {}),
+				...(paneID ? { pane_id: paneID } : {}),
 			});
 		});
 		socket.on("data", chunk => this.#onData(chunk));

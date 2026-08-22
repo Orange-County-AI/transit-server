@@ -88,6 +88,26 @@ func connectAdapter(t *testing.T, path, harness, sessionID, name string) *adapte
 	return client
 }
 
+func registerAdapterDirect(t *testing.T, d *Daemon, frame agentFrame) *agentAdapter {
+	t.Helper()
+	server, client := net.Pipe()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = client.Close()
+	})
+	adapter, code, message := d.registerAgentAdapter(frame, os.Getpid(), 0, server)
+	if code != "" {
+		t.Fatalf("register = %q, %q", code, message)
+	}
+	return adapter
+}
+
+func setAdapterTestHerdrAgents(d *Daemon, agents []HerdrAgent) {
+	d.mu.Lock()
+	d.herdrAgents = agents
+	d.mu.Unlock()
+}
+
 func (client *adapterTestClient) read(t *testing.T) agentFrame {
 	t.Helper()
 	if err := client.connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
@@ -129,6 +149,75 @@ func TestAdapterRegistrationKeepsSessionIdentity(t *testing.T) {
 			third := connectAdapter(t, path, harness, "session-two", "")
 			if third.name == first.name {
 				t.Fatalf("different session reused %q", third.name)
+			}
+		})
+	}
+}
+
+func TestAdapterRegistrationAdoptsHerdrPaneName(t *testing.T) {
+	var prompts int
+	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
+	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
+
+	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
+	if adapter.name != "omp-pane" {
+		t.Fatalf("adapter name = %q, want %q", adapter.name, "omp-pane")
+	}
+	if adapter.namedBy != "herdr" {
+		t.Fatalf("adapter named by = %q, want %q", adapter.namedBy, "herdr")
+	}
+	if record := d.nativeNames["omp:session-1"]; record.NamedBy != "herdr" {
+		t.Fatalf("stored named by = %q, want %q", record.NamedBy, "herdr")
+	}
+}
+
+func TestAdapterRegistrationExplicitNameWinsOverHerdrPane(t *testing.T) {
+	var prompts int
+	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
+	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
+
+	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1", Name: "explicit"})
+	if adapter.name != "explicit" || adapter.namedBy != "user" {
+		t.Fatalf("adapter = %#v, want explicit user name", adapter)
+	}
+}
+
+func TestAdapterRegistrationStoredNameWinsOverHerdrPane(t *testing.T) {
+	var prompts int
+	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
+	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
+	d.nativeNames["omp:session-1"] = nativeName{Name: "stored", NamedBy: "auto"}
+
+	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
+	if adapter.name != "stored" || adapter.namedBy != "auto" {
+		t.Fatalf("adapter = %#v, want stored auto name", adapter)
+	}
+}
+
+func TestAdapterRegistrationFallsBackToAutoNameWithoutAvailablePaneName(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		paneID string
+		held   bool
+	}{
+		{name: "unknown pane", paneID: "unknown"},
+		{name: "empty pane", paneID: ""},
+		{name: "native name held", paneID: "pane-1", held: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var prompts int
+			d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
+			setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
+			if test.held {
+				d.nativeNames["omp:other-session"] = nativeName{Name: "omp-pane", NamedBy: "auto"}
+			}
+
+			adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: test.paneID})
+			if adapter.name == "omp-pane" {
+				t.Fatalf("adapter adopted unavailable pane name %q", adapter.name)
+			}
+			if adapter.namedBy != "auto" {
+				t.Fatalf("adapter named by = %q, want %q", adapter.namedBy, "auto")
 			}
 		})
 	}

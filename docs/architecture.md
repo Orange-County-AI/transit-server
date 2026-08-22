@@ -262,10 +262,14 @@ queues, and MCP RPC; an adapter is a local client, never a Worker client.
 its address; a fork gets a new one; each re-registration increments a
 `generation`. Names persist in `native_names.json` and reuse the same
 auto-naming and reserved-name rules as the Herdr roster. A native session's
-synthetic pane id is `native:<harness>:<session prefix>`. Because the Transit
-MCP server is a child of the harness process, its tool calls resolve identity by
-walking the caller's PPID chain to a registered adapter, which is what lets
-`send_message` work with `herdr.service` stopped.
+synthetic pane id is `native:<harness>:<session prefix>`. An adapter that has a
+`HERDR_PANE_ID` adopts the matching pane's name only when it has neither an
+explicit launcher name nor a persisted session name; an explicit name, then a
+persisted name, then the pane name take precedence over a generated auto-name.
+An existing native session's persisted name is never adopted. Because the
+Transit MCP server is a child of the harness process, its tool calls resolve
+identity by walking the caller's PPID chain to a registered adapter, which is
+what lets `send_message` work with `herdr.service` stopped.
 
 **Decision — a write is not an acknowledgement.** Claude's monitor writes the
 envelope to stdout and only acks once the delivery id appears in the session's
