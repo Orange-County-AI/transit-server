@@ -118,6 +118,29 @@ describe("transit-wire/1", () => {
     expect(decodeDaemonFrame('{"t":"roster","agents":[]}')).toEqual({ t: "roster", agents: [] });
     // A present but non-array agents field is still malformed.
     expect(() => decodeDaemonFrame('{"t":"roster","agents":"alice"}')).toThrow(WireError);
+    // A newer daemon's unrecognized provenance degrades to a label, never to a
+    // closed connection: `named_by: "herdr"` once 4002'd a host off the wire and
+    // took every agent on it down with the frame.
+    expect(
+      decodeDaemonFrame(
+        '{"t":"roster","agents":[{"name":"alice","kind":"omp","pane_id":"w1:p1","status":"idle","cwd":"/tmp","title":"t","named_by":"herdr"}]}',
+      ),
+    ).toEqual({
+      t: "roster",
+      agents: [
+        {
+          name: "alice",
+          kind: "omp",
+          pane_id: "w1:p1",
+          status: "idle",
+          cwd: "/tmp",
+          title: "t",
+          named_by: "user",
+        },
+      ],
+    });
+    // A structurally broken agent is still rejected.
+    expect(() => decodeDaemonFrame('{"t":"roster","agents":[{"name":"alice"}]}')).toThrow(WireError);
     // An older daemon omits the agent echo; the frame must still decode.
     expect(decodeDaemonFrame('{"t":"deliver_ack","id":"dlv_001122334455"}')).toEqual({
       t: "deliver_ack",

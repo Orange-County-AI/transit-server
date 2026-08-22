@@ -102,10 +102,13 @@ function rosterAgent(value: unknown): RosterAgent {
   if (!isObject(value)) {
     throw new WireError("roster agent must be an object", "invalid_frame");
   }
-  const namedBy = stringField(value, "named_by");
-  if (namedBy !== "user" && namedBy !== "auto") {
-    throw new WireError("named_by must be user or auto", "invalid_frame");
-  }
+  // `named_by` is provenance shown next to an agent, and a roster frame carries
+  // every agent on the host: rejecting the frame over one cosmetic label costs
+  // that host its entire connection, which is what a newer daemon's `herdr`
+  // value did before it was normalized away. An unrecognized provenance reads
+  // as `user` instead, so a daemon that learns a new one degrades a label
+  // rather than disconnecting a fleet. Structural fields below still throw.
+  const namedBy = stringField(value, "named_by") === "auto" ? "auto" : "user";
   return {
     name: stringField(value, "name"),
     kind: stringField(value, "kind"),
