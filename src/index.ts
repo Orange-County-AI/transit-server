@@ -1092,6 +1092,16 @@ app.get("/api/deliveries", async (context) => {
     "dead",
   ];
   if (!allowed.includes(filter)) return context.json({ error: "invalid_filter" }, 400);
+  // The cap used to be hardcoded at 200 in both statements with no way to raise
+  // it and no way to see it: a caller asking for more silently received 200 and
+  // read it as the whole ledger, which is how a fleet sweep during an incident
+  // came back reassuring. An out-of-range limit is refused rather than clamped,
+  // because a quietly adjusted answer is the same defect again.
+  const requested = context.req.query("limit");
+  const limit = requested === undefined ? 200 : Number(requested);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+    return context.json({ error: "invalid_limit" }, 400);
+  }
   const channel = await context.env.DB.prepare(
     `SELECT d.id, 'channel' AS kind, i.connector AS source, d.target_addr,
             d.status, d.attempts, d.read_at, d.settled_at, d.created_at,
@@ -1104,9 +1114,9 @@ app.get("/api/deliveries", async (context) => {
      WHERE i.org_id = ?
        AND (? = 'all' OR d.status = ? OR
             (? = 'unsettled' AND d.status IN ('pending','dispatched','read','replied')))
-     ORDER BY d.created_at DESC LIMIT 200`,
+     ORDER BY d.created_at DESC LIMIT ?`,
   )
-    .bind(org, filter, filter, filter)
+    .bind(org, filter, filter, filter, limit + 1)
     .all<Record<string, unknown>>();
   const messages = await context.env.DB.prepare(
     `SELECT m.id, m.kind, m.from_addr AS source,
@@ -1128,9 +1138,9 @@ app.get("/api/deliveries", async (context) => {
      FROM message m LEFT JOIN message_delivery d ON d.message_id = m.id
      WHERE m.org_id = ? OR m.recipient_org_id = ?
      GROUP BY m.id
-     ORDER BY m.created_at DESC LIMIT 200`,
+     ORDER BY m.created_at DESC LIMIT ?`,
   )
-    .bind(org, org)
+    .bind(org, org, limit + 1)
     .all<Record<string, unknown>>();
   const filteredMessages = messages.results.filter((delivery) =>
     filter === "all"
@@ -1139,10 +1149,22 @@ app.get("/api/deliveries", async (context) => {
         ? delivery.status === "queued"
         : delivery.status === filter,
   );
-  const deliveries = [...channel.results, ...filteredMessages]
-    .sort((left, right) => Number(right.created_at) - Number(left.created_at))
-    .slice(0, 200);
-  return context.json({ deliveries });
+  const merged = [...channel.results, ...filteredMessages].sort(
+    (left, right) => Number(right.created_at) - Number(left.created_at),
+  );
+  // Both statements fetch one row past the limit so truncation can be reported
+  // rather than inferred: a ledger that silently ends at its cap reads as a
+  // complete ledger, which is how a fleet sweep came back reassuring while a
+  // redelivery loop was running. The message rows are status-filtered after the
+  // statement, so `truncated` answers "more rows existed", not "more rows would
+  // have matched this filter".
+  const truncated =
+    channel.results.length > limit || messages.results.length > limit || merged.length > limit;
+  return context.json({
+    deliveries: merged.slice(0, limit),
+    limit,
+    truncated,
+  });
 });
 
 // Drops a stuck agent delivery from every HostHub queue holding it. `requeue`
