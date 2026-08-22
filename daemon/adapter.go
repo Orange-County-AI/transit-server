@@ -339,36 +339,59 @@ func (d *Daemon) nativeAdapterForProcess(pid int) *agentAdapter {
 // claimNativeName renames the native adapter that owns pid's process
 // ancestry, persisting to native_names.json. Returns the full address.
 func (d *Daemon) claimNativeName(pid int, name string) (address string, err error) {
-	if !namePattern.MatchString(name) || reservedNames[name] {
-		return "", fmt.Errorf("invalid or reserved agent name %q", name)
-	}
 	adapter := d.nativeAdapterForProcess(pid)
 	if adapter == nil {
 		return "", fmt.Errorf("agent_not_found")
 	}
-	d.mu.Lock()
+	return d.claimNativeAdapterName(adapter, name)
+}
+
+func (d *Daemon) validateNativeNameClaim(adapter *agentAdapter, name string) error {
+	if !namePattern.MatchString(name) || reservedNames[name] {
+		return fmt.Errorf("invalid or reserved agent name %q", name)
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.nativeNameClaimErrorLocked(adapter, name)
+}
+
+func (d *Daemon) nativeNameClaimErrorLocked(adapter *agentAdapter, name string) error {
 	if d.adapters[adapter.key] != adapter {
-		d.mu.Unlock()
-		return "", fmt.Errorf("agent_not_found")
+		return fmt.Errorf("agent_not_found")
 	}
 	for key, record := range d.nativeNames {
 		if key != adapter.key && record.Name == name {
-			d.mu.Unlock()
-			return "", fmt.Errorf("name is already claimed by another native session")
+			return fmt.Errorf("name is already claimed by another native session")
 		}
 	}
 	if existing := d.nativeByName[name]; existing != nil && existing != adapter {
+		return fmt.Errorf("name is already claimed by another native session")
+	}
+	return nil
+}
+
+func (d *Daemon) claimNativeAdapterName(adapter *agentAdapter, name string) (address string, err error) {
+	if !namePattern.MatchString(name) || reservedNames[name] {
+		return "", fmt.Errorf("invalid or reserved agent name %q", name)
+	}
+	d.mu.Lock()
+	if err := d.nativeNameClaimErrorLocked(adapter, name); err != nil {
 		d.mu.Unlock()
-		return "", fmt.Errorf("name is already claimed by another native session")
+		return "", err
 	}
 	previousName := adapter.name
+	previousNamedBy := adapter.namedBy
+	previousGeneration := adapter.generation
 	previousRecord := d.nativeNames[adapter.key]
+	generation := previousRecord.Generation + 1
 	adapter.name = name
 	adapter.namedBy = "user"
-	d.nativeNames[adapter.key] = nativeName{Name: name, NamedBy: "user", Generation: previousRecord.Generation}
+	adapter.generation = generation
+	d.nativeNames[adapter.key] = nativeName{Name: name, NamedBy: "user", Generation: generation}
 	if err := d.saveNativeNamesLocked(); err != nil {
 		adapter.name = previousName
-		adapter.namedBy = previousRecord.NamedBy
+		adapter.namedBy = previousNamedBy
+		adapter.generation = previousGeneration
 		d.nativeNames[adapter.key] = previousRecord
 		d.mu.Unlock()
 		return "", err

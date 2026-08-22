@@ -32,15 +32,33 @@ func newAdapterTestDaemon(t *testing.T, mode string, agents []HerdrAgent, prompt
 		case "ping":
 			return pong(), nil
 		case "agent.list":
-			return map[string]any{"type": "agent_list", "agents": agents}, nil
+			mu.Lock()
+			list := append([]HerdrAgent(nil), agents...)
+			mu.Unlock()
+			return map[string]any{"type": "agent_list", "agents": list}, nil
 		case "agent.prompt":
 			mu.Lock()
 			*prompts++
-			mu.Unlock()
 			if len(agents) == 0 {
+				mu.Unlock()
 				return nil, &HerdrAPIError{Code: "agent_not_found"}
 			}
-			return map[string]any{"type": "agent_prompted", "agent": agents[0]}, nil
+			agent := agents[0]
+			mu.Unlock()
+			return map[string]any{"type": "agent_prompted", "agent": agent}, nil
+		case "agent.rename":
+			params, _ := request.Params.(map[string]any)
+			target, _ := params["target"].(string)
+			name, _ := params["name"].(string)
+			mu.Lock()
+			defer mu.Unlock()
+			for index := range agents {
+				if agents[index].PaneID == target || agents[index].Name == target {
+					agents[index].Name = name
+					return map[string]any{"type": "agent_info", "agent": agents[index]}, nil
+				}
+			}
+			return nil, &HerdrAPIError{Code: "agent_not_found"}
 		case "pane.read":
 			return map[string]any{"type": "pane_read", "read": map[string]any{"text": ""}}, nil
 		default:
@@ -106,6 +124,29 @@ func setAdapterTestHerdrAgents(d *Daemon, agents []HerdrAgent) {
 	d.mu.Lock()
 	d.herdrAgents = agents
 	d.mu.Unlock()
+}
+
+func attachNativeCaller(t *testing.T, d *Daemon, name string) *agentAdapter {
+	t.Helper()
+	start, err := processStartTime(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = client.Close()
+	})
+	adapter := &agentAdapter{
+		key: "omp:caller", harness: "omp", sessionID: "caller", pid: os.Getpid(), pidStart: start,
+		name: name, namedBy: "herdr", generation: 7, connection: server, waiters: make(map[string]chan agentDeliveryOutcome),
+	}
+	d.mu.Lock()
+	d.adapters[adapter.key] = adapter
+	d.nativeByName[name] = adapter
+	d.nativeNames[adapter.key] = nativeName{Name: name, NamedBy: "herdr", Generation: adapter.generation}
+	d.mu.Unlock()
+	return adapter
 }
 
 func (client *adapterTestClient) read(t *testing.T) agentFrame {
@@ -220,6 +261,79 @@ func TestAdapterRegistrationFallsBackToAutoNameWithoutAvailablePaneName(t *testi
 				t.Fatalf("adapter named by = %q, want %q", adapter.namedBy, "auto")
 			}
 		})
+	}
+}
+
+func TestClaimCallerNameRebindsNativeAdapter(t *testing.T) {
+	var prompts int
+	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
+	adapter := attachNativeCaller(t, d, "omp-old")
+
+	address, err := d.claimCallerName(context.Background(), map[string]any{"pid": os.Getpid(), "name": "omp-new"})
+	if err != nil || address != "omp-new@titan" {
+		t.Fatalf("claimCallerName = %q, %v", address, err)
+	}
+	record := d.nativeNames[adapter.key]
+	if adapter.name != "omp-new" || adapter.namedBy != "user" || adapter.generation != 8 {
+		t.Fatalf("adapter = %#v, want renamed user generation 8", adapter)
+	}
+	if record.Name != "omp-new" || record.NamedBy != "user" || record.Generation != 8 {
+		t.Fatalf("stored native name = %#v, want renamed user generation 8", record)
+	}
+}
+
+func TestClaimCallerNameRenamesPaneWithoutNativeAdapter(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{{Name: "omp-old", Kind: "omp", PaneID: "pane-1"}}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	setAdapterTestHerdrAgents(d, agents)
+
+	address, err := d.claimCallerName(context.Background(), map[string]any{"pane_id": "pane-1", "name": "omp-new"})
+	if err != nil || address != "omp-new@titan" {
+		t.Fatalf("claimCallerName = %q, %v", address, err)
+	}
+	if agents[0].Name != "omp-new" {
+		t.Fatalf("Herdr agent name = %q, want %q", agents[0].Name, "omp-new")
+	}
+}
+
+func TestClaimCallerNameRenamesNativeAdapterAndPane(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{{Name: "omp-old", Kind: "omp", PaneID: "pane-1"}}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	setAdapterTestHerdrAgents(d, agents)
+	adapter := attachNativeCaller(t, d, "omp-old")
+
+	address, err := d.claimCallerName(context.Background(), map[string]any{
+		"pane_id": "pane-1", "pid": os.Getpid(), "name": "omp-new",
+	})
+	if err != nil || address != "omp-new@titan" {
+		t.Fatalf("claimCallerName = %q, %v", address, err)
+	}
+	if agents[0].Name != "omp-new" || adapter.name != "omp-new" {
+		t.Fatalf("pane/native names = %q/%q, want %q", agents[0].Name, adapter.name, "omp-new")
+	}
+}
+
+func TestClaimCallerNameRejectsNativeNameHeldByAnotherSessionWithoutRenamingPane(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{{Name: "omp-old", Kind: "omp", PaneID: "pane-1"}}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	setAdapterTestHerdrAgents(d, agents)
+	adapter := attachNativeCaller(t, d, "omp-old")
+	d.nativeNames["omp:other"] = nativeName{Name: "omp-taken", NamedBy: "user", Generation: 3}
+
+	_, err := d.claimCallerName(context.Background(), map[string]any{
+		"pane_id": "pane-1", "pid": os.Getpid(), "name": "omp-taken",
+	})
+	if err == nil || err.Error() != "name is already claimed by another native session" {
+		t.Fatalf("claimCallerName error = %v", err)
+	}
+	if agents[0].Name != "omp-old" || adapter.name != "omp-old" {
+		t.Fatalf("pane/native names mutated to %q/%q", agents[0].Name, adapter.name)
+	}
+	if record := d.nativeNames[adapter.key]; record.Name != "omp-old" || record.Generation != 7 {
+		t.Fatalf("native record mutated to %#v", record)
 	}
 }
 

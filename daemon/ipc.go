@@ -358,19 +358,31 @@ func (d *Daemon) whoamiResponse(request map[string]any) map[string]any {
 	})
 }
 
-// claimCallerName routes a name claim to whichever registry owns the caller:
-// the Herdr pane rename for a pane-managed session, the native adapter
-// registry for a session that registered itself.
+// claimCallerName rebinds the native adapter for a native caller. When that
+// caller also has a Herdr pane, it renames the pane too so both registries keep
+// the same address. Pane-only callers retain the Herdr rename path.
 func (d *Daemon) claimCallerName(ctx context.Context, request map[string]any) (string, error) {
 	paneID := stringValue(request, "pane_id")
 	name := stringValue(request, "name")
-	if agent, found := d.localAgentByPane(paneID); found && agent.PaneID != "" {
-		return d.claimName(ctx, paneID, name)
-	}
+	paneAgent, hasPane := d.localAgentByPane(paneID)
+
+	var adapter *agentAdapter
 	if pid := intValue(request, "pid"); pid > 0 {
-		if _, _, found := d.adapterByProcess(pid); found {
-			return d.claimNativeName(pid, name)
+		adapter = d.nativeAdapterForProcess(pid)
+	}
+	if adapter != nil {
+		if err := d.validateNativeNameClaim(adapter, name); err != nil {
+			return "", err
 		}
+		if hasPane && paneAgent.PaneID != "" {
+			if _, err := d.claimName(ctx, paneID, name); err != nil {
+				return "", err
+			}
+		}
+		return d.claimNativeAdapterName(adapter, name)
+	}
+	if hasPane && paneAgent.PaneID != "" {
+		return d.claimName(ctx, paneID, name)
 	}
 	return d.claimName(ctx, paneID, name)
 }
