@@ -1,0 +1,61 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "transit-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [
+    { "type": "Text", "globs": ["**/*.md"], "fallthrough": true }
+  ],
+  "observability": { "enabled": true },
+  // Point this at the hostname you own, then set `vars.BETTER_AUTH_URL` to the
+  // same origin. Until you do, the Worker is reachable at its `workers.dev`
+  // URL. See docs/self-hosting.md.
+  //
+  // "routes": [
+  //   { "pattern": "transit.example.com", "custom_domain": true }
+  // ],
+
+  // Cloudflare Email Sending binding — powers the password-reset email
+  // (src/lib/email/reset-password.ts). No API keys: sends ride the native
+  // binding. The `EMAIL_FROM` address's domain must be onboarded once with
+  // `wrangler email sending enable <domain>` (or the dashboard) before sends
+  // succeed. Remove this binding and `EMAIL_FROM` if you do not want
+  // password-reset mail; every other flow works without it.
+  "send_email": [{ "name": "EMAIL" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "HOST_HUB", "class_name": "HostHub" },
+      { "name": "ROOM", "class_name": "Room" },
+      { "name": "INTEGRATION", "class_name": "Integration" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["HostHub", "Room", "Integration"]
+    }
+  ],
+  // Daily retention sweep (src/lib/transit/retention.ts).
+  "triggers": {
+    "crons": ["0 4 * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "transit-db",
+      // `mise run d1:create` fills this in.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "./drizzle"
+    }
+  ],
+  "vars": {
+    // The canonical public origin of this Worker. Better Auth signs cookies
+    // against it and `POST /api/hosts/enroll` prints it in the `transit enroll`
+    // command it returns. Set it to your deployed URL.
+    "BETTER_AUTH_URL": "http://localhost:8787",
+    // Sender for transactional email (password reset only). Must be an address
+    // on a domain onboarded to Cloudflare Email Sending.
+    "EMAIL_FROM": "noreply@example.com"
+  }
+}

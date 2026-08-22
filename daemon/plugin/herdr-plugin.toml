@@ -1,0 +1,42 @@
+id = "ocai.transit"
+name = "Transit"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "Agent-mesh inbox, roster, and delivery controls"
+platforms = ["linux", "macos"]
+
+# `herdr plugin install` runs this after the source preview and before it
+# registers the plugin: it compiles ../transit and copies it onto PATH.
+# `herdr plugin link` does not run build commands, so a locally linked checkout
+# needs `mise run daemon:build`, which writes the same ../transit path.
+[[build]]
+command = ["sh", "install.sh"]
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["../transit", "status", "--ensure-daemon"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["../transit", "status", "--kick"]
+
+[[panes]]
+id = "inbox"
+title = "Transit inbox"
+placement = "popup"
+width = "80%"
+height = 20
+command = ["../transit", "inbox", "--watch"]
+
+[[actions]]
+id = "open-inbox"
+title = "Transit inbox"
+contexts = ["workspace"]
+command = ["sh", "-c", "\"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin ocai.transit --entrypoint inbox --placement popup"]
+
+
+[[actions]]
+id = "toggle-pause"
+title = "Transit: pause/resume delivery"
+contexts = ["workspace"]
+command = ["../transit", "pause", "--toggle"]

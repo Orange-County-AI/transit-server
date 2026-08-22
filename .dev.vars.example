@@ -1,0 +1,15 @@
+# Copy to `.dev.vars` for `wrangler dev`. Generate both secrets with
+# `openssl rand -base64 32`.
+#
+# BETTER_AUTH_URL is the origin browsers and daemons reach this Worker on.
+BETTER_AUTH_URL=http://localhost:8787
+# Signs session cookies. Rotating it signs every session out.
+BETTER_AUTH_SECRET=change-me-generate-with-openssl-rand-base64-32
+# AES-GCM key sealing integration and custom-source secrets before they touch
+# D1 or Durable Object storage. Losing it makes those secrets unrecoverable.
+TRANSIT_MASTER_KEY=change-me-generate-with-openssl-rand-base64-32
+
+# Optional. Extra origins Better Auth's CSRF check accepts, comma-separated.
+# Needed when you reach the Worker on a hostname that is not BETTER_AUTH_URL —
+# a reverse proxy, an /etc/hosts entry, or an alternate port.
+# BETTER_AUTH_TRUSTED_ORIGINS=https://transit.example.com

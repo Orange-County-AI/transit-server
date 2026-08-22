@@ -1,0 +1,44 @@
+{
+  "name": "transit-server",
+  "description": "Self-hostable Transit server: durable agent-to-agent messaging on Cloudflare Workers.",
+  "license": "MIT",
+  "repository": "github:Orange-County-AI/transit-server",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "daemon:build": "cd daemon && CGO_ENABLED=0 go build -o transit .",
+    "daemon:test": "cd daemon && go test ./...",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply transit-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply transit-db --remote"
+  },
+  "//dependencies": "Every version is exact. `bun.lock` is committed, but a Worker whose auth schema is generated against one better-auth minor and installed against the next fails at runtime, not at build — a caret range on `better-auth` breaks a fresh clone the day upstream ships a schema field. Run `mise run oss:lock` after any change here.",
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.15.2",
+    "@types/bun": "latest",
+    "drizzle-kit": "0.31.10",
+    "jsonc-parser": "3.3.1",
+    "vitest": "4.1.11",
+    "wrangler": "4.125.0"
+  },
+  "peerDependencies": {
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "better-auth": "1.6.5",
+    "drizzle-orm": "0.45.2",
+    "hono": "4.12.14",
+    "transit-connector-gmail": "github:Orange-County-AI/transit-connector-gmail#v0.2.0",
+    "transit-connector-kaneo": "github:Orange-County-AI/transit-connector-kaneo#v0.1.0",
+    "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.2.0",
+    "transit-connector-mattermost": "github:Orange-County-AI/transit-connector-mattermost#v0.2.1",
+    "transit-connector-telegram": "github:Orange-County-AI/transit-connector-telegram#v0.1.0"
+  }
+}

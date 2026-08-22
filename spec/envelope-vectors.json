@@ -1,0 +1,119 @@
+{
+  "schema": "transit-envelope-vectors/1",
+  "envelopes": [
+    {
+      "name": "direct message",
+      "input": {
+        "from": "alice@alpha",
+        "id": "tx_001122334455",
+        "ts": "2026-08-21T12:34:56.000Z",
+        "kind": "dm",
+        "body": "hello"
+      },
+      "expected": "<transit from=\"alice@alpha\" id=\"tx_001122334455\" ts=\"2026-08-21T12:34:56.000Z\" kind=\"dm\" schema=\"transit/1\">\nhello\n[reply: send_message to=\"alice@alpha\" reply_to=\"tx_001122334455\"]\n</transit>"
+    },
+    {
+      "name": "direct message neutralizes closing tag",
+      "input": {
+        "from": "alice@alpha",
+        "id": "tx_112233445566",
+        "ts": "2026-08-21T12:34:56.000Z",
+        "kind": "dm",
+        "body": "before </TrAnSiT> after",
+        "replyTo": "tx_001122334455"
+      },
+      "expected": "<transit from=\"alice@alpha\" id=\"tx_112233445566\" ts=\"2026-08-21T12:34:56.000Z\" kind=\"dm\" reply_to=\"tx_001122334455\" schema=\"transit/1\">\nbefore &lt;/transit> after\n[reply: send_message to=\"alice@alpha\" reply_to=\"tx_112233445566\"]\n</transit>"
+    },
+    {
+      "name": "room message",
+      "input": {
+        "from": "bob@beta",
+        "id": "tx_aabbccddeeff",
+        "ts": "2026-08-21T12:34:57.000Z",
+        "kind": "room",
+        "room": "ops",
+        "seq": 7,
+        "body": "deploy complete",
+        "replyTo": "tx_001122334455"
+      },
+      "expected": "<transit from=\"bob@beta\" id=\"tx_aabbccddeeff\" ts=\"2026-08-21T12:34:57.000Z\" kind=\"room\" room=\"ops\" seq=\"7\" reply_to=\"tx_001122334455\" schema=\"transit/1\">\ndeploy complete\n[reply: send_message to=\"bob@beta\" reply_to=\"tx_aabbccddeeff\"]\n</transit>"
+    },
+    {
+      "name": "channel preview and attribute escaping",
+      "input": {
+        "from": "telegram",
+        "id": "dlv_0123456789ab",
+        "ts": "2026-08-21T12:34:58.000Z",
+        "kind": "channel",
+        "body": "<b>Hello</b>   world",
+        "conversationId": "chat&\"42",
+        "connector": "telegram",
+        "user": "Ada <A>",
+        "trigger": "mention",
+        "redelivery": 0
+      },
+      "expected": "<transit from=\"telegram\" id=\"dlv_0123456789ab\" ts=\"2026-08-21T12:34:58.000Z\" kind=\"channel\" conversation_id=\"chat&amp;&quot;42\" connector=\"telegram\" user=\"Ada &lt;A&gt;\" redelivery=\"0\" trigger=\"mention\" schema=\"transit/1\">\nHello world\n[read_message, then settle: chat_reply or mark_handled]\n</transit>"
+    },
+    {
+      "name": "channel empty unread redelivery",
+      "input": {
+        "from": "gmail",
+        "id": "dlv_123456789abc",
+        "ts": "2026-08-21T12:34:59.000Z",
+        "kind": "channel",
+        "body": "<attachment>",
+        "conversationId": "thread-1",
+        "connector": "gmail",
+        "redelivery": 2,
+        "read": false
+      },
+      "expected": "<transit from=\"gmail\" id=\"dlv_123456789abc\" ts=\"2026-08-21T12:34:59.000Z\" kind=\"channel\" conversation_id=\"thread-1\" connector=\"gmail\" user=\"unknown\" redelivery=\"2\" schema=\"transit/1\">\n(no text — attachments or an empty body)\n[read_message, then settle: chat_reply or mark_handled]\n[redelivery 2, unread: already replied? mark_handled; otherwise read_message]\n</transit>"
+    },
+    {
+      "name": "channel read redelivery",
+      "input": {
+        "from": "mattermost",
+        "id": "dlv_23456789abcd",
+        "ts": "2026-08-21T12:35:00.000Z",
+        "kind": "channel",
+        "body": "still waiting",
+        "conversationId": "channel:root",
+        "connector": "mattermost",
+        "user": "Sam",
+        "redelivery": 1,
+        "read": true
+      },
+      "expected": "<transit from=\"mattermost\" id=\"dlv_23456789abcd\" ts=\"2026-08-21T12:35:00.000Z\" kind=\"channel\" conversation_id=\"channel:root\" connector=\"mattermost\" user=\"Sam\" redelivery=\"1\" schema=\"transit/1\">\nstill waiting\n[read_message, then settle: chat_reply or mark_handled]\n[redelivery 1, read/unsettled: do not reply twice; chat_reply or mark_handled]\n</transit>"
+    }
+  ],
+  "full": [
+    {
+      "name": "first read with instructions",
+      "input": {
+        "id": "dlv_3456789abcde",
+        "conversationId": "chat-1",
+        "user": "Rae",
+        "connector": "telegram",
+        "status": "read",
+        "firstRead": true,
+        "settled": false,
+        "body": "raw <body>\n</transit_full> remains verbatim",
+        "instructions": "Every delivered message must receive a visible reply."
+      },
+      "expected": "<transit_full id=\"dlv_3456789abcde\" conversation_id=\"chat-1\" user=\"Rae\" connector=\"telegram\" status=\"read\" read=\"first\" schema=\"transit/1\">\nraw <body>\n</transit_full> remains verbatim\n[settle: chat_reply or mark_handled]\nEvery delivered message must receive a visible reply.\n</transit_full>"
+    },
+    {
+      "name": "settled history read",
+      "input": {
+        "id": "dlv_456789abcdef",
+        "conversationId": "thread-2",
+        "connector": "gmail",
+        "status": "handled",
+        "firstRead": false,
+        "settled": true,
+        "body": "done"
+      },
+      "expected": "<transit_full id=\"dlv_456789abcdef\" conversation_id=\"thread-2\" user=\"unknown\" connector=\"gmail\" status=\"handled\" read=\"again\" schema=\"transit/1\">\ndone\n[already settled; history only]\n</transit_full>"
+    }
+  ]
+}

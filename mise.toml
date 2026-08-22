@@ -1,0 +1,155 @@
+[tools]
+bun = "1.3.14"
+node = "22"
+go = "1.26"
+
+# Tasks — run `mise tasks` to list them.
+#
+# First-time self-hosted setup, from a clone of this repository:
+#   mise trust && mise install   # pin bun + node + go per [tools]
+#   mise run install             # install dependencies
+#   bunx wrangler login          # one-time Cloudflare auth
+#   mise run secret:put          # generate BETTER_AUTH_SECRET + TRANSIT_MASTER_KEY
+#   mise run d1:create           # create the D1 and patch its id into wrangler.jsonc
+#   mise run migrate:remote      # apply the schema
+#   mise run deploy              # ship it
+#
+# On a headless box, export CLOUDFLARE_API_TOKEN instead of running
+# `wrangler login`; every Cloudflare-touching task reads it from the
+# environment.
+#
+# See docs/self-hosting.md for the full walkthrough, including creating the
+# first operator account and enrolling a host over the API.
+
+[tasks.install]
+description = "Install dependencies from the committed lockfile"
+# --frozen-lockfile because bun.lock pins the better-auth version that
+# src/db/schema.ts was generated against. Resolving fresh can pull a minor that
+# expects a column the schema does not have, and sign-up starts returning 500.
+run = "bun install --frozen-lockfile"
+
+[tasks.dev]
+description = "Run the Worker locally on http://localhost:8787"
+run = "bunx wrangler dev"
+
+[tasks.typecheck]
+description = "Typecheck the Worker"
+run = "bunx tsc --noEmit"
+
+[tasks.test]
+description = "Run the Worker test suite (vitest in @cloudflare/vitest-pool-workers)"
+run = "bunx vitest run"
+
+[tasks."test:watch"]
+description = "Run the Worker test suite in watch mode"
+run = "bunx vitest"
+
+[tasks."daemon:build"]
+description = "Build the static Transit edge daemon into daemon/transit"
+dir = "daemon"
+run = "CGO_ENABLED=0 go build -o transit ."
+
+[tasks."daemon:test"]
+description = "Run the Transit daemon Go tests"
+dir = "daemon"
+run = "go test ./..."
+
+[tasks."db:generate"]
+description = "Generate a Drizzle migration from the updated schema"
+run = "bunx drizzle-kit generate"
+
+[tasks."migrate:local"]
+description = "Apply migrations to the local D1"
+run = "bunx wrangler d1 migrations apply transit-db --local"
+
+[tasks."migrate:remote"]
+description = "Apply migrations to the remote D1"
+depends = ["d1:create"]
+run = "bunx wrangler d1 migrations apply transit-db --remote"
+
+[tasks."d1:create"]
+description = "Create the remote D1 and patch its database_id into wrangler.jsonc (idempotent)"
+run = '''
+config="wrangler.jsonc"
+database="transit-db"
+
+command -v jq >/dev/null 2>&1 || { echo "✗ d1:create requires jq (https://jqlang.org)" >&2; exit 1; }
+
+id=""
+if list_json=$(bunx wrangler d1 list --json 2>/dev/null); then
+  id=$(printf '%s' "$list_json" | jq -r --arg name "$database" '.[] | select(.name == $name) | .uuid' | head -1)
+fi
+
+if [ -n "$id" ]; then
+  echo "• remote D1 '$database' already exists — reusing $id"
+else
+  # Answer wrangler's interactive "add binding for me?" prompt with "n" so it
+  # does not append a second d1_databases entry — we patch the existing binding.
+  create_out=$(printf 'n\n' | bunx wrangler d1 create "$database" 2>&1) || {
+    printf '%s\n' "$create_out" >&2
+    exit 1
+  }
+  printf '%s\n' "$create_out"
+  id=$(printf '%s' "$create_out" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+fi
+
+if [ -z "$id" ]; then
+  echo "✗ could not determine D1 database_id from wrangler output" >&2
+  exit 1
+fi
+
+# Read the configured binding structurally, then replace that exact quoted
+# UUID — the shipped value is a zero placeholder, but after the first run it is
+# a real id, and a placeholder-only anchor would silently skip the repair.
+configured_id=$(node -e 'const fs=require("fs"); const s=fs.readFileSync(process.argv[1],"utf8").replace(/^\s*\/\/.*$/gm,"").replace(/,(\s*[}\]])/g,"$1"); const db=JSON.parse(s).d1_databases.find((d)=>d.database_name===process.argv[2]); if (!db) process.exit(1); process.stdout.write(db.database_id);' "$config" "$database") || {
+  echo "✗ could not locate the $database binding in $config" >&2
+  exit 1
+}
+if [ "$configured_id" = "$id" ]; then
+  echo "✓ $config already has database_id $id"
+  exit 0
+fi
+tmp=$(mktemp)
+sed "s|\"$configured_id\"|\"$id\"|" "$config" > "$tmp" && mv "$tmp" "$config"
+echo "✓ $config patched with database_id $id"
+'''
+
+[tasks."secret:put"]
+description = "Generate and set BETTER_AUTH_SECRET and TRANSIT_MASTER_KEY on the Worker (idempotent)"
+run = '''
+command -v jq >/dev/null 2>&1 || { echo "✗ secret:put requires jq (https://jqlang.org)" >&2; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "✗ secret:put requires openssl" >&2; exit 1; }
+
+existing=$(bunx wrangler secret list --format json 2>/dev/null | jq -r '.[].name' 2>/dev/null || true)
+
+for name in BETTER_AUTH_SECRET TRANSIT_MASTER_KEY; do
+  if printf '%s\n' "$existing" | grep -qx "$name"; then
+    echo "• $name already set — leaving it alone"
+    continue
+  fi
+  # TRANSIT_MASTER_KEY must decode to exactly 32 bytes: it is the AES-GCM key
+  # sealing integration and custom-source secrets. Rotating it makes every
+  # already-sealed secret unrecoverable, which is why this never overwrites.
+  openssl rand -base64 32 | tr -d '\n' | bunx wrangler secret put "$name"
+  echo "✓ $name generated and set"
+done
+'''
+
+[tasks.deploy]
+description = "Deploy the Worker"
+depends = ["d1:create", "migrate:remote"]
+run = '''
+bunx wrangler deploy
+
+echo
+echo "Set vars.BETTER_AUTH_URL in wrangler.jsonc to this Worker's public origin"
+echo "and redeploy if you have not already — Better Auth signs cookies against"
+echo "it, and it is the origin printed in the enrollment command."
+'''
+
+[tasks.teardown]
+description = "Delete the remote Worker and its D1 database (irreversible)"
+run = [
+  "bunx wrangler delete --name transit-server --force",
+  "bunx wrangler d1 delete transit-db -y",
+]

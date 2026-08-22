@@ -1,0 +1,15 @@
+{
+  "name": "transit",
+  "version": "0.1.0",
+  "description": "Receive Transit agent messages in Claude Code.",
+  "experimental": {
+    "monitors": [
+      {
+        "name": "transit-inbox",
+        "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/transit adapter listen --harness claude",
+        "description": "Transit agent messages",
+        "when": "always"
+      }
+    ]
+  }
+}

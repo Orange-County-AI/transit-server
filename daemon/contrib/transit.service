@@ -1,0 +1,13 @@
+[Unit]
+Description=Transit agent mesh daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/transit daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

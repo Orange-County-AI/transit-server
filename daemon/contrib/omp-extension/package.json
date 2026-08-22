@@ -1,0 +1,19 @@
+{
+  "name": "transit-omp-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test"
+  },
+  "omp": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./pi.js"
+    ]
+  }
+}
