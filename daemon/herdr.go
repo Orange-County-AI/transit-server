@@ -27,6 +27,20 @@ type HerdrAgent struct {
 	Title          string `json:"terminal_title_stripped"`
 	LaunchPending  bool   `json:"launch_pending"`
 	StateChangeSeq uint64 `json:"state_change_seq"`
+	Session        struct {
+		Kind  string `json:"kind"`
+		Value string `json:"value"`
+	} `json:"agent_session"`
+}
+
+// SessionTranscript is the harness session file Herdr reports for this pane,
+// when it reports one as a path. It is the only local artefact that proves a
+// harness accepted a delivery.
+func (a HerdrAgent) SessionTranscript() string {
+	if a.Session.Kind != "path" {
+		return ""
+	}
+	return a.Session.Value
 }
 
 type PromptResult struct {

@@ -95,6 +95,78 @@ func newGuardRig(t *testing.T, kind, screen string) *guardRig {
 	return rig
 }
 
+// withTranscript points the rig's agent at a session file, which is what Herdr
+// reports for a real pane and what proves a harness read a delivery.
+func (rig *guardRig) withTranscript(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.mu.Lock()
+	rig.agent.Session.Kind = "path"
+	rig.agent.Session.Value = path
+	rig.mu.Unlock()
+	rig.daemon.herdrAgents = []HerdrAgent{rig.agent}
+	return path
+}
+
+// The state-change proof is empty for an agent that was already working when
+// the envelope arrived — every busy pane — so a coded timeout on a delivery
+// that landed was still reported failed and the Worker sent it again. The
+// transcript is what settles it.
+func TestDeliverAcksALandedPromptForAnAlreadyWorkingAgent(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-empty.txt"))
+	frame := WireFrame{ID: "tx_guard000011", Agent: "alice", Envelope: "<transit id=\"tx_guard000011\"/>"}
+	rig.withTranscript(t, "{\"text\":\"<transit id=\\\"tx_guard000011\\\"/>\"}\n")
+	rig.promptError = &HerdrAPIError{Code: "timeout", Message: "agent did not settle within 30000ms"}
+	// No state change at all: the agent was busy before and stayed busy.
+	rig.moveSeqOnPrompt = false
+
+	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+		t.Fatalf("deliver = %q, %v; want an ack proven by the transcript", code, err)
+	}
+	if !rig.daemon.store.IncomingRecorded(frame.ID) {
+		t.Fatal("a landed delivery was not archived, so the Worker would send it again")
+	}
+}
+
+// A transcript that does not mention the id is not evidence, whatever the
+// agent's status did.
+func TestDeliverNaksWhenTheTranscriptLacksTheDelivery(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-empty.txt"))
+	rig.withTranscript(t, "{\"text\":\"an unrelated turn\"}\n")
+	rig.promptError = &HerdrAPIError{Code: "timeout", Message: "agent did not settle within 30000ms"}
+	frame := WireFrame{ID: "tx_guard000012", Agent: "alice", Envelope: "<transit id=\"tx_guard000012\"/>"}
+
+	code, retryable, err := rig.daemon.deliver(context.Background(), frame)
+	if code != "timeout" || !retryable || err == nil {
+		t.Fatalf("deliver = %q retryable=%t err=%v, want a retryable timeout", code, retryable, err)
+	}
+	if rig.daemon.store.IncomingRecorded(frame.ID) {
+		t.Fatal("an unproven delivery was archived")
+	}
+}
+
+// A redelivery of something the pane already read must not be typed again, even
+// when this daemon has no archive of it — a lost ack is exactly the case where
+// the Worker sends it back.
+func TestRedeliveryAlreadyInTheTranscriptIsNotRepasted(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-empty.txt"))
+	frame := WireFrame{ID: "tx_guard000013", Agent: "alice", Envelope: "<transit id=\"tx_guard000013\"/>"}
+	rig.withTranscript(t, "{\"text\":\"<transit id=\\\"tx_guard000013\\\"/>\"}\n")
+
+	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+		t.Fatalf("redelivery = %q, %v; want a silent ack", code, err)
+	}
+	if prompts, keys, _ := rig.snapshot(); len(prompts) != 0 || len(keys) != 0 {
+		t.Fatalf("re-injected a message the pane had already read: prompts=%#v keys=%#v", prompts, keys)
+	}
+	if !rig.daemon.store.IncomingRecorded(frame.ID) {
+		t.Fatal("the settled redelivery was not archived")
+	}
+}
+
 func (rig *guardRig) setScreen(screen string) {
 	rig.mu.Lock()
 	rig.screen = screen

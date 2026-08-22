@@ -92,6 +92,19 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 		return "agent_launch_pending", true, fmt.Errorf("agent %s is launching", frame.Agent)
 	}
 
+	// A redelivery of something this pane already read is not worth typing
+	// again. The daemon's own archive is the first check, but it misses an ack
+	// the Worker never received — a lost ack was how the same envelope came
+	// back two and three times — so the harness transcript is asked too.
+	if transcript := agent.SessionTranscript(); transcript != "" {
+		if found, err := transcriptContains(transcript, frame.ID); err == nil && found {
+			if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
+				return "history_write_failed", true, err
+			}
+			return "", false, nil
+		}
+	}
+
 	stranded := false
 	if draftGuardEnabled() {
 		switch state := d.composerState(ctx, agent, frame.Envelope); state {
@@ -120,13 +133,13 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 		}
 		return "", false, nil
 	}
-	// Ask the pane whether the prompt landed anyway, whatever the failure was
-	// called. Herdr reports a coded `timeout` when the wait outlives the
-	// agent's turn, and gating this proof on a codeless failure meant a
-	// delivered envelope was reported failed — so the Worker redelivered it and
-	// the agent read the same message twice.
-	if current, getErr := d.herdr.GetAgent(ctx, agent.Name); getErr == nil && current != nil &&
-		current.StateChangeSeq != before {
+	// Ask the harness whether the prompt landed anyway, whatever the failure was
+	// called. Herdr answers a coded `timeout` whenever its wait outlives the
+	// agent's turn, and a state change proves nothing for an agent that was
+	// already working when the envelope arrived — which is every busy pane. The
+	// session transcript is the artefact that settles it, exactly as the native
+	// adapters use it.
+	if d.deliveryLanded(ctx, agent, frame.ID, before) {
 		if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
 			return "history_write_failed", true, err
 		}
@@ -137,6 +150,24 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 		message = "agent prompt failed"
 	}
 	return deliveryFailureCode(result), true, fmt.Errorf("%s", message)
+}
+
+// deliveryLanded reports whether the harness took this delivery. The delivery
+// id travels inside the rendered envelope, so finding it in the pane's session
+// transcript is proof the harness read it; a moved state_change_seq is the
+// weaker fallback for a harness Herdr reports without a transcript path.
+func (d *Daemon) deliveryLanded(ctx context.Context, agent HerdrAgent, id string, before uint64) bool {
+	current, err := d.herdr.GetAgent(ctx, agent.Name)
+	if err != nil || current == nil {
+		return false
+	}
+	if transcript := current.SessionTranscript(); transcript != "" {
+		found, readErr := transcriptContains(transcript, id)
+		if readErr == nil {
+			return found
+		}
+	}
+	return current.StateChangeSeq != before
 }
 
 type composerVerdict int

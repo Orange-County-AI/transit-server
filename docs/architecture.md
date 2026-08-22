@@ -215,13 +215,21 @@ daemon presses `Enter` instead of calling `agent.prompt`. **Rationale:** a
 second `agent.prompt` appends a second copy, which is how a stalled delivery
 accumulated in a composer.
 
-**Decision — the pane, not the error code, decides whether a prompt landed.**
-After any failed `agent.prompt` the daemon re-reads the agent and acknowledges
-the delivery when `state_change_seq` moved. **Rationale:** Herdr answers a
-coded `timeout` whenever its wait outlives the agent's turn, which is routine;
-gating the proof on a codeless failure reported delivered envelopes as failed,
-so the HostHub redelivered them and agents read the same message two and three
-times.
+**Decision — the harness transcript, not the error code, decides whether a
+prompt landed.** After any failed `agent.prompt` the daemon looks for the
+delivery id in the session file Herdr names for that pane
+(`agent_session.value`, bounded to the last 512 KiB) and acknowledges the
+delivery when it is there; a moved `state_change_seq` is the fallback for a
+pane Herdr reports without a transcript path. The same lookup runs before
+typing, so a redelivery the pane already read is acknowledged instead of
+injected again. **Rationale:** Herdr answers a coded `timeout` whenever its
+wait outlives the agent's turn, which is routine, and a state change proves
+nothing for an agent that was already working when the envelope arrived —
+which is every busy pane. Gating the proof on either signal alone reported
+delivered envelopes as failed, so the HostHub redelivered them and agents read
+the same message two and three times. The delivery id travels inside the
+rendered envelope, so the harness having persisted it is the same receipt the
+native adapters wait for.
 
 **Decision — each daemon maintains one outbound WSS connection to the Worker
 using `transit-wire/1`, reconnecting with jittered backoff.** It authenticates
