@@ -42,6 +42,7 @@ type HerdrDriver interface {
 	GetAgent(context.Context, string) (*HerdrAgent, error)
 	PaneScreen(context.Context, string) (string, error)
 	PromptAgent(context.Context, string, string, time.Duration) PromptResult
+	SubmitPaste(context.Context, string, string, time.Duration) PromptResult
 	Rename(context.Context, string, string) (*HerdrAgent, error)
 	Notify(context.Context, string, string) error
 }
@@ -195,6 +196,22 @@ func (d *herdrSocket) PromptAgent(ctx context.Context, target, text string, time
 	return PromptResult{OK: true, Blocked: agent.Status == "blocked"}
 }
 
+// SubmitPaste submits a paste this daemon already left in the composer instead
+// of typing the envelope a second time. Without it, a delivery that stalled and
+// stayed unsent accumulated a fresh copy on every retry.
+func (d *herdrSocket) SubmitPaste(ctx context.Context, target, text string, timeout time.Duration) PromptResult {
+	if timeout <= 0 {
+		timeout = promptTimeout
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout+5*time.Second)
+	defer cancel()
+	result, definitive := d.flushPastedPrompt(callCtx, target, text, timeout)
+	if !definitive {
+		return PromptResult{Code: "paste_submit_unproven", Error: "the pasted envelope was not submitted"}
+	}
+	return result
+}
+
 func promptFailure(err error) PromptResult {
 	var apiError *HerdrAPIError
 	if errors.As(err, &apiError) {
@@ -205,28 +222,29 @@ func promptFailure(err error) PromptResult {
 
 // flushPastedPrompt recovers a paste that Herdr's submit key did not send: a
 // large envelope collapses into an OMP attachment chip, and the collapse
-// absorbs the key, so the envelope sits unsent in the composer. One Enter
-// submits it — but only while the composer holds nothing except that paste.
-// Once a person has typed alongside it, Enter would submit their draft too,
-// which is the whole thing the draft guard exists to prevent, so the delivery
-// is held instead. Accepting the key proves nothing either: only a moved
-// state_change_seq proves the agent took the prompt, so every failed
-// precondition reports false and leaves the original stall standing.
+// absorbs the key, so the envelope sits unsent in the composer.
+//
+// The Enter always goes. Vetoing it when a person had typed alongside the
+// paste was worse than either alternative it was choosing between: the message
+// never arrived, the person's input stayed corrupted by our bytes, and every
+// retry pasted another copy on top. Our bytes are already in their composer by
+// this point, and the only ways out are to submit them or to delete text we do
+// not own. So we submit, and we say so when their own unsent text went along
+// with it. Holding before the paste (deliver.go) remains the real protection.
+//
+// Accepting the key proves nothing though: only a moved state_change_seq
+// proves the agent took the prompt, so every failed precondition reports false
+// and leaves the original stall standing.
 func (d *herdrSocket) flushPastedPrompt(ctx context.Context, target, text string, timeout time.Duration) (PromptResult, bool) {
 	agent, err := d.GetAgent(ctx, target)
 	if err != nil || agent == nil || agent.PaneID == "" {
 		return PromptResult{}, false
 	}
-	if draftGuardEnabled() {
-		screen, screenErr := d.PaneScreen(ctx, agent.PaneID)
-		if screenErr == nil {
-			content, located := composerContent(agent.Kind, screen)
-			if located && !composerHoldsOnlyPaste(content, text) {
-				return PromptResult{
-					Code:  "draft_busy",
-					Error: fmt.Sprintf("%s gained unsent input in pane %s during the paste", agent.Kind, agent.PaneID),
-				}, true
-			}
+	if screen, screenErr := d.PaneScreen(ctx, agent.PaneID); screenErr == nil {
+		content, located := composerContent(agent.Kind, screen)
+		if located && !composerHoldsOnlyPaste(content, text) {
+			_ = d.Notify(ctx, "transit: your draft was sent with a message",
+				"a delivery landed in the composer while you were typing, and both were submitted")
 		}
 	}
 	before := agent.StateChangeSeq

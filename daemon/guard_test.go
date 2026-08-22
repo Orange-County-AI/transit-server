@@ -13,16 +13,18 @@ import (
 // capture. onStall swaps the screen for the one the paste produced, which is
 // the only moment the recovery path can observe.
 type guardRig struct {
-	daemon  *Daemon
-	agent   HerdrAgent
-	mu      sync.Mutex
-	screen  string
-	onStall string
-	stall   bool
-	seq     uint64
-	prompts []string
-	keys    []string
-	notices int
+	daemon          *Daemon
+	agent           HerdrAgent
+	mu              sync.Mutex
+	screen          string
+	onStall         string
+	stall           bool
+	promptError     *HerdrAPIError
+	moveSeqOnPrompt bool
+	seq             uint64
+	prompts         []string
+	keys            []string
+	notices         int
 }
 
 func newGuardRig(t *testing.T, kind, screen string) *guardRig {
@@ -50,6 +52,12 @@ func newGuardRig(t *testing.T, kind, screen string) *guardRig {
 		case "agent.prompt":
 			text, _ := params["text"].(string)
 			rig.prompts = append(rig.prompts, text)
+			if rig.moveSeqOnPrompt {
+				rig.seq++
+			}
+			if rig.promptError != nil {
+				return nil, rig.promptError
+			}
 			if rig.stall {
 				if rig.onStall != "" {
 					rig.screen = rig.onStall
@@ -207,9 +215,10 @@ func TestHeldPaneIsWatchedUntilTheComposerClears(t *testing.T) {
 }
 
 // A stalled paste sits unsent in the composer and reads exactly like a draft.
-// Holding a delivery behind its own paste would wedge it forever, so the guard
-// asks whose text it is, not merely whether text is there.
-func TestDeliverIsNotHeldBehindItsOwnPaste(t *testing.T) {
+// It is neither held behind itself nor typed a second time: it is submitted,
+// because a second copy is how a stalled delivery used to accumulate in
+// someone's composer.
+func TestStrandedPasteIsSubmittedNotRepasted(t *testing.T) {
 	for _, test := range []struct {
 		screen   string
 		envelope string
@@ -226,16 +235,25 @@ func TestDeliverIsNotHeldBehindItsOwnPaste(t *testing.T) {
 			if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
 				t.Fatalf("deliver against its own unsent paste = %q, %v; want delivery", code, err)
 			}
-			if prompts, _, _ := rig.snapshot(); len(prompts) != 1 {
-				t.Fatalf("prompts = %#v, want one", prompts)
+			prompts, keys, _ := rig.snapshot()
+			if len(prompts) != 0 {
+				t.Fatalf("pasted a second copy on top of its own paste: %#v", prompts)
+			}
+			if len(keys) != 1 || keys[0] != "Enter" {
+				t.Fatalf("keys = %#v, want a single Enter submitting the stranded paste", keys)
+			}
+			if !rig.daemon.store.IncomingRecorded(frame.ID) {
+				t.Fatal("submitted delivery was not archived")
 			}
 		})
 	}
 }
 
-// Someone who starts typing while Transit's paste is landing must not have
-// their draft submitted by the recovery Enter.
-func TestStallRecoveryRefusesEnterOnceAPersonHasTyped(t *testing.T) {
+// Once Transit's bytes are in the composer the only exits are to submit them or
+// to delete text we do not own. Vetoing the Enter was worse than either horn:
+// the message never arrived, the person's input stayed corrupted, and each
+// retry pasted another copy. So the recovery submits and says so.
+func TestStallRecoverySubmitsAndOwnsUpWhenAPersonHadTyped(t *testing.T) {
 	for _, test := range []struct {
 		screen   string
 		envelope string
@@ -252,39 +270,52 @@ func TestStallRecoveryRefusesEnterOnceAPersonHasTyped(t *testing.T) {
 				Envelope: readEnvelopeFixture(t, test.envelope),
 			}
 
-			code, retryable, err := rig.daemon.deliver(context.Background(), frame)
-			if code != "draft_busy" || !retryable || err == nil {
-				t.Fatalf("stall recovery over a person's draft = %q retryable=%t err=%v, want a draft_busy hold",
-					code, retryable, err)
+			if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+				t.Fatalf("stall recovery = %q, %v; want the paste submitted rather than abandoned", code, err)
 			}
-			if _, keys, _ := rig.snapshot(); len(keys) != 0 {
-				t.Fatalf("recovery pressed keys into a draft: %#v", keys)
+			_, keys, notices := rig.snapshot()
+			if len(keys) != 1 || keys[0] != "Enter" {
+				t.Fatalf("recovery keys = %#v, want a single Enter", keys)
 			}
-			if rig.daemon.store.IncomingRecorded(frame.ID) {
-				t.Fatal("a refused recovery was archived as delivered")
+			if notices != 1 {
+				t.Fatalf("notifications = %d, want one telling the person their draft was sent too", notices)
+			}
+			if !rig.daemon.store.IncomingRecorded(frame.ID) {
+				t.Fatal("submitted delivery was not archived")
 			}
 		})
 	}
 }
 
-func TestStallRecoverySubmitsItsOwnPaste(t *testing.T) {
+// Herdr reports a coded `timeout` when its wait outlives the agent's turn. The
+// envelope did land, so reporting failure made the Worker redeliver it and the
+// agent read the same message twice.
+func TestDeliverAcksAPromptThatLandedDespiteACodedFailure(t *testing.T) {
 	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-empty.txt"))
-	rig.stall = true
-	rig.onStall = readScreenFixture(t, "omp-paste-chip.txt")
-	frame := WireFrame{
-		ID: "tx_guard000005", Agent: "alice",
-		Envelope: readEnvelopeFixture(t, "chip.txt"),
-	}
+	rig.promptError = &HerdrAPIError{Code: "timeout", Message: "agent did not settle within 30000ms"}
+	rig.moveSeqOnPrompt = true
+	frame := WireFrame{ID: "tx_guard000009", Agent: "alice", Envelope: "<transit/>"}
 
 	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
-		t.Fatalf("stall recovery for its own paste = %q, %v; want delivery", code, err)
-	}
-	_, keys, _ := rig.snapshot()
-	if len(keys) != 1 || keys[0] != "Enter" {
-		t.Fatalf("recovery keys = %#v, want a single Enter", keys)
+		t.Fatalf("deliver after a coded timeout on a turn that started = %q, %v; want an ack", code, err)
 	}
 	if !rig.daemon.store.IncomingRecorded(frame.ID) {
-		t.Fatal("recovered delivery was not archived")
+		t.Fatal("a landed delivery was not archived, so the Worker would redeliver it")
+	}
+}
+
+// The same coded failure with no evidence the agent moved is a real failure.
+func TestDeliverNaksACodedFailureWithNoEvidence(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-empty.txt"))
+	rig.promptError = &HerdrAPIError{Code: "timeout", Message: "agent did not settle within 30000ms"}
+	frame := WireFrame{ID: "tx_guard000010", Agent: "alice", Envelope: "<transit/>"}
+
+	code, retryable, err := rig.daemon.deliver(context.Background(), frame)
+	if code != "timeout" || !retryable || err == nil {
+		t.Fatalf("deliver = %q retryable=%t err=%v, want a retryable timeout", code, retryable, err)
+	}
+	if rig.daemon.store.IncomingRecorded(frame.ID) {
+		t.Fatal("an unproven delivery was archived")
 	}
 }
 
