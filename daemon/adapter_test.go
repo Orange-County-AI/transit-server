@@ -52,6 +52,17 @@ func newAdapterTestDaemon(t *testing.T, mode string, agents []HerdrAgent, prompt
 			list := append([]HerdrAgent(nil), agents...)
 			mu.Unlock()
 			return map[string]any{"type": "agent_list", "agents": list}, nil
+		case "agent.get":
+			params, _ := request.Params.(map[string]any)
+			target, _ := params["target"].(string)
+			mu.Lock()
+			defer mu.Unlock()
+			for index := range agents {
+				if agents[index].PaneID == target || agents[index].Name == target {
+					return map[string]any{"type": "agent_info", "agent": agents[index]}, nil
+				}
+			}
+			return nil, &HerdrAPIError{Code: "agent_not_found"}
 		case "agent.prompt":
 			mu.Lock()
 			*prompts++
@@ -242,15 +253,61 @@ func TestAdapterRegistrationExplicitNameWinsOverHerdrPane(t *testing.T) {
 	}
 }
 
-func TestAdapterRegistrationStoredNameWinsOverHerdrPane(t *testing.T) {
+// A stored name someone chose outranks the pane: renaming an agent must stick
+// across a reconnect.
+func TestAdapterRegistrationStoredChosenNameWinsOverHerdrPane(t *testing.T) {
 	var prompts int
 	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
 	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
-	d.nativeNames[defaultEnrollment+"|session:session-1"] = nativeName{Name: "stored", NamedBy: "auto"}
+	d.nativeNames[defaultEnrollment+"|session:session-1"] = nativeName{Name: "stored", NamedBy: "user"}
 
 	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
-	if adapter.name != "stored" || adapter.namedBy != "auto" {
-		t.Fatalf("adapter = %#v, want stored auto name", adapter)
+	if adapter.name != "stored" || adapter.namedBy != "user" {
+		t.Fatalf("adapter = %#v, want the stored chosen name", adapter)
+	}
+}
+
+// A stored name the DAEMON invented is a placeholder and yields to the pane.
+// It used to win, which is how a name minted during a restart — when the
+// roster was still empty and the pane could not be seen — became permanent
+// and left the agent registered beside its own pane under two names.
+func TestAdapterRegistrationStoredAutoNameYieldsToHerdrPane(t *testing.T) {
+	var prompts int
+	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
+	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
+	d.nativeNames[defaultEnrollment+"|session:session-1"] = nativeName{
+		Name: "omp-placeholder", NamedBy: "auto", Generation: 4, Token: "0123456789abcdef0123456789abcdef",
+	}
+
+	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
+	if adapter.name != "omp-pane" || adapter.namedBy != "herdr" {
+		t.Fatalf("adapter = %q/%q, want the pane's name", adapter.name, adapter.namedBy)
+	}
+	if adapter.token != "0123456789abcdef0123456789abcdef" {
+		t.Fatal("the identity credential rotated on a rename")
+	}
+	if adapter.generation != 5 {
+		t.Fatalf("generation = %d, want the stored 4 carried forward", adapter.generation)
+	}
+}
+
+// Every adapter on the box reconnects at once when the daemon restarts, which
+// is precisely when the cached roster is still empty. Registering off that
+// empty cache minted a placeholder beside a pane that already had a name.
+func TestAdapterRegistrationResolvesItsPaneWithAnEmptyRoster(t *testing.T) {
+	var prompts int
+	d, _ := newAdapterTestDaemon(t, "prefer", []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}}, &prompts)
+	// The roster cache is deliberately NOT primed: no refreshRoster has run.
+	d.mu.RLock()
+	cached := len(d.herdrAgents)
+	d.mu.RUnlock()
+	if cached != 0 {
+		t.Fatalf("herdr cache holds %d agents; the test would pass for the wrong reason", cached)
+	}
+
+	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
+	if adapter.name != "omp-pane" {
+		t.Fatalf("adapter name = %q, want the pane's name resolved directly from Herdr", adapter.name)
 	}
 }
 

@@ -572,6 +572,34 @@ func (d *Daemon) adapterKeyLocked(frame agentFrame, enrollment string) (key, anc
 	return enrollment + "|session:" + frame.SessionID, "session"
 }
 
+// paneAgentForRegistration resolves the pane a registering client says it
+// occupies. The cached roster is a snapshot refreshed every couple of seconds
+// and it is EMPTY for the first one after a daemon restart — which is exactly
+// when every adapter on the box reconnects at once. Concluding from that miss
+// that the pane does not exist minted a fresh auto-name beside a pane that
+// already had one, and because a stored name outranks a pane on the next
+// registration, the placeholder then stuck. A miss asks Herdr directly.
+func (d *Daemon) paneAgentForRegistration(paneID string) (HerdrAgent, bool) {
+	if paneID == "" {
+		return HerdrAgent{}, false
+	}
+	if agent, found := d.localAgentByPane(paneID); found {
+		return agent, true
+	}
+	if !d.herdrReachable() {
+		return HerdrAgent{}, false
+	}
+	// Bounded locally rather than threaded from the caller: this is one call
+	// on a unix socket, and a registration must not block on it.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	agent, err := d.herdr.GetAgent(ctx, paneID)
+	if err != nil || agent == nil {
+		return HerdrAgent{}, false
+	}
+	return *agent, true
+}
+
 func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, connection net.Conn) (*agentAdapter, string, string) {
 	if !harnessPattern.MatchString(frame.Harness) {
 		return nil, "unsupported_harness", "harness must match [a-z][a-z0-9-]{0,31}"
@@ -591,7 +619,7 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	} else if runtime := d.defaultEnrollmentRuntime(); runtime != nil {
 		enrollment = runtime.id
 	}
-	paneAgent, hasPaneAgent := d.localAgentByPane(frame.PaneID)
+	paneAgent, hasPaneAgent := d.paneAgentForRegistration(frame.PaneID)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -633,6 +661,14 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 		nameRecord.NamedBy = "user"
 		hasName = true
 	}
+	// A stored name the daemon invented is a placeholder, not a decision. When
+	// the pane in front of it carries a name — one a person chose, or one
+	// Herdr generated and has been showing ever since — the placeholder yields
+	// to it. Stored `user` and `herdr` names still win: those were chosen.
+	if hasName && nameRecord.NamedBy == "auto" && hasPaneAgent &&
+		paneAgent.Name != "" && paneAgent.Name != nameRecord.Name {
+		hasName = false
+	}
 	if !hasName {
 		adopted := false
 		if hasPaneAgent && paneAgent.Name != "" {
@@ -644,7 +680,9 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 				}
 			}
 			if !claimed {
-				nameRecord = nativeName{Name: paneAgent.Name, NamedBy: "herdr", Enrollment: enrollment}
+				// Only the name changes: the credential and the generation
+				// belong to the identity, which is the same one either way.
+				nameRecord.Name, nameRecord.NamedBy = paneAgent.Name, "herdr"
 				adopted = true
 			}
 		}
@@ -664,7 +702,7 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 			if err != nil {
 				return nil, "name_allocation_failed", err.Error()
 			}
-			nameRecord = nativeName{Name: name, NamedBy: "auto", Enrollment: enrollment}
+			nameRecord.Name, nameRecord.NamedBy = name, "auto"
 		}
 	}
 
