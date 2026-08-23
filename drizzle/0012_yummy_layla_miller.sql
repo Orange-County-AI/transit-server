@@ -1,0 +1,1 @@
+ALTER TABLE `integration_delivery` ADD `wire_sends` integer DEFAULT 0 NOT NULL;

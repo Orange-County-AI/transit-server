@@ -4,7 +4,7 @@ import {
   connectedOrganizationById,
   organizationSlugById,
 } from "../lib/transit/organizations";
-import { renderEnvelope } from "../lib/transit/envelope";
+import { type ChannelEnvelope, renderEnvelope } from "../lib/transit/envelope";
 import { txId } from "../lib/transit/ids";
 
 
@@ -67,6 +67,7 @@ export type RoomChannelDelivery = {
   deliveryId: string;
   org: string;
   envelope: string;
+  render?: ChannelEnvelope;
   redelivery?: boolean;
 };
 
@@ -402,6 +403,7 @@ export class Room extends DurableObject<Env> {
           agent: target.name,
           targetAddr: target.address,
           envelope: input.envelope,
+          ...(input.render ? { render: input.render } : {}),
           redelivery: input.redelivery,
           ...(liveConnectionId ? { connectionId: liveConnectionId } : {}),
         });

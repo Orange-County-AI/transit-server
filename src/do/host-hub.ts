@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { renderEnvelope, renderFull } from "../lib/transit/envelope";
+import { type ChannelEnvelope, renderEnvelope, renderFull } from "../lib/transit/envelope";
 import { createRoom } from "../lib/transit/rooms";
 
 
@@ -72,6 +72,11 @@ export type QueueDeliveryInput = {
   agent: string;
   targetAddr: string;
   envelope: string;
+  // Channel envelopes carry a `redelivery` counter that is only true for the
+  // send it was rendered for. Carrying the inputs lets a retry re-render with
+  // the real count instead of re-sending bytes that claim to be a first
+  // sighting. Absent for DMs and room posts, which have no such counter.
+  render?: ChannelEnvelope;
   enqueuedAt?: number;
   roomName?: string;
   roomSeq?: number;
@@ -85,6 +90,7 @@ type QueuedDelivery = {
   agent: string;
   targetAddr: string;
   envelope: string;
+  render?: ChannelEnvelope;
   attempts: number;
   enqueuedAt: number;
   roomName?: string;
@@ -213,6 +219,7 @@ export class HostHub extends DurableObject<Env> {
         agent: input.agent,
         targetAddr: input.targetAddr,
         envelope: input.envelope,
+        ...(input.render ? { render: input.render } : {}),
         attempts: 0,
         enqueuedAt: input.enqueuedAt ?? Date.now(),
         ...(input.roomName ? { roomName: input.roomName } : {}),
@@ -896,12 +903,21 @@ export class HostHub extends DurableObject<Env> {
         return true;
       });
       if (!claimed) continue;
+      // `item.attempts` is the number of sends that already went out, so the
+      // first send re-renders to exactly the bytes the dispatcher produced and
+      // every retry says how many times the agent has now been handed this.
+      const envelope = item.render
+        ? renderEnvelope({
+            ...item.render,
+            redelivery: (item.render.redelivery ?? 0) + item.attempts,
+          })
+        : item.envelope;
       try {
         this.sendFrame(socket, {
           t: "deliver",
           id: item.messageId,
           agent: item.agent,
-          envelope: item.envelope,
+          envelope,
         });
       } catch (error) {
         attempted.lastError = error instanceof Error ? error.message : String(error);
@@ -930,6 +946,20 @@ export class HostHub extends DurableObject<Env> {
           )
           .run(),
       );
+      }
+      if (attempted.messageId.startsWith("dlv_")) {
+        // A channel delivery is ledgered by the Integration DO, which counts
+        // its own dispatches and never sees the socket. Without this the ledger
+        // reads one attempt while the host has pushed the envelope four times,
+        // and the duplicates an agent sees are recorded nowhere at all.
+        this.background(
+          "channel_wire_send_write_failed",
+          this.env.DB.prepare(
+            "UPDATE integration_delivery SET wire_sends = ? WHERE id = ?",
+          )
+            .bind(attempted.attempts, attempted.messageId)
+            .run(),
+        );
       }
     }
 

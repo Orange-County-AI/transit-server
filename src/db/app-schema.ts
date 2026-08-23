@@ -211,6 +211,10 @@ export const integrationDelivery = sqliteTable(
     // overstates them, which is exactly how a 3-arrival delivery got reported
     // as 49.
     injections: integer("injections").notNull().default(0),
+    // Envelopes the HostHub actually wrote to a daemon socket. The queue
+    // retries an unacked entry, and none of those sends were recorded here at
+    // all, so a delivery an agent saw four times read as one attempt.
+    wireSends: integer("wire_sends").notNull().default(0),
     readAt: integer("read_at", { mode: "timestamp_ms" }),
     settledAt: integer("settled_at", { mode: "timestamp_ms" }),
     // The transport that carried this channel delivery to its agent, written

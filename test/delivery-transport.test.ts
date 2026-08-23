@@ -459,6 +459,77 @@ describe("channel redelivery", () => {
     const { deliveries } = await response.json<{ deliveries: Record<string, unknown>[] }>();
     const row = deliveries.find((entry) => entry.id === deliveryId)!;
     expect(row.arrivals).toBe(1);
-    expect(Number(row.attempts)).toBeGreaterThan(1);
+    expect(Number(row.dispatches)).toBeGreaterThan(1);
+  });
+
+  // The queue re-sends an unacked entry, and none of those sends were recorded
+  // anywhere: the ledger read one attempt while the host had pushed the
+  // envelope repeatedly, so the duplicates an agent saw were invisible.
+  it("records every wire send of a channel delivery", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["erin"]);
+
+    const deliveryId = await ingestOne(cookie, "wire-source", "erin@titan", "wire-event");
+    expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+
+    // Never acked, so the host queue retries the same entry on its own clock.
+    const hub = env.HOST_HUB.getByName(`org:${credentials.org}:host:titan`);
+    for (let round = 0; round < 2; round += 1) {
+      await runInDurableObject(hub, async (_instance, state) => {
+        const entries = await state.storage.list<{ lastAttemptAt?: number }>({ prefix: "q:" });
+        for (const [key, entry] of entries) {
+          await state.storage.put(key, { ...entry, lastAttemptAt: 0 });
+        }
+      });
+      await runDurableObjectAlarm(hub);
+      expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+    }
+
+    await expect
+      .poll(() =>
+        env.DB.prepare("SELECT wire_sends FROM integration_delivery WHERE id = ?")
+          .bind(deliveryId)
+          .first<{ wire_sends: number }>(),
+      )
+      .toEqual({ wire_sends: 3 });
+
+    const response = await SELF.fetch(`${ORIGIN}/api/deliveries`, { headers: { cookie } });
+    const { deliveries } = await response.json<{ deliveries: Record<string, unknown>[] }>();
+    // Three sends, nothing acked: the gap is the whole point of the field.
+    expect(deliveries.find((row) => row.id === deliveryId)).toMatchObject({
+      sends: 3,
+      arrivals: 0,
+      dispatches: 1,
+    });
+  });
+
+  // A retry re-sent the stored bytes verbatim, so a second copy arrived stamped
+  // redelivery="0" and told the agent it was seeing the message for the first
+  // time. The counter has to describe the send, not the render.
+  it("restates the redelivery counter on a queue retry", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["frank"]);
+
+    const deliveryId = await ingestOne(cookie, "restate-source", "frank@titan", "restate-event");
+    const first = await frames.next();
+    expect(first).toMatchObject({ t: "deliver", id: deliveryId });
+    expect(String(first.envelope)).toContain('redelivery="0"');
+
+    const hub = env.HOST_HUB.getByName(`org:${credentials.org}:host:titan`);
+    await runInDurableObject(hub, async (_instance, state) => {
+      const entries = await state.storage.list<{ lastAttemptAt?: number }>({ prefix: "q:" });
+      for (const [key, entry] of entries) {
+        await state.storage.put(key, { ...entry, lastAttemptAt: 0 });
+      }
+    });
+    await runDurableObjectAlarm(hub);
+
+    const retry = await frames.next();
+    expect(retry).toMatchObject({ t: "deliver", id: deliveryId });
+    expect(String(retry.envelope)).toContain('redelivery="1"');
+    // The banner is what the agent reads, so it has to move with the count.
+    expect(String(retry.envelope)).toContain("[redelivery 1");
   });
 });

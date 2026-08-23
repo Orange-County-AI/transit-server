@@ -1180,7 +1180,8 @@ app.get("/api/deliveries", async (context) => {
   }
   const channel = await context.env.DB.prepare(
     `SELECT d.id, 'channel' AS kind, i.connector AS source, d.target_addr,
-            d.status, d.attempts, d.injections AS arrivals,
+            d.status, d.attempts AS dispatches, d.wire_sends AS sends,
+            d.injections AS arrivals,
             d.read_at, d.settled_at, d.created_at,
             e.conversation_id, e.user, substr(e.content, 1, 240) AS preview,
             r.posted_at, r.post_error, d.via
@@ -1207,7 +1208,10 @@ app.get("/api/deliveries", async (context) => {
               THEN 'queued'
               ELSE 'injected'
             END AS status,
-            COALESCE(MAX(d.attempts), 0) AS attempts,
+            -- Wire sends, the same meaning "sends" carries on a channel row:
+            -- message_delivery.attempts is already the HostHub's send count.
+            COALESCE(MAX(d.attempts), 0) AS sends,
+            NULL AS dispatches,
             -- Arrivals, not sends. The queue re-sends an unacked entry, and
             -- the daemon dedupes a tx_ id, so a message can be sent five
             -- times and surface once. Count the recipients it actually

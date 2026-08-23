@@ -15,7 +15,11 @@ import {
   POLL_ALARM_BUDGET_PER_HOUR,
 } from "../lib/transit/alarm-budget";
 import { openSecret, sealSecret, sha256hex } from "../lib/transit/crypto";
-import { renderEnvelope, renderFull } from "../lib/transit/envelope";
+import {
+  type ChannelEnvelope,
+  renderEnvelope,
+  renderFull,
+} from "../lib/transit/envelope";
 import { dlvId, eventId } from "../lib/transit/ids";
 import { consumeStoredToken } from "../lib/transit/token-bucket";
 
@@ -779,7 +783,7 @@ export class Integration extends DurableObject<Env> {
     const delivery = await this.requireDelivery(id);
     if (delivery.settledAt !== undefined || delivery.status === "dead") return;
     const event = await this.requireEvent(delivery.eventId);
-    const envelope = renderEnvelope({
+    const render: ChannelEnvelope = {
       from: meta.connector,
       id: delivery.id,
       ts: new Date(event.receivedAt).toISOString(),
@@ -791,7 +795,11 @@ export class Integration extends DurableObject<Env> {
       trigger: event.trigger,
       redelivery: delivery.attempts,
       read: delivery.readAt !== undefined,
-    });
+    };
+    // The rendered string is what a first send emits; the inputs travel with it
+    // so a queue retry can restate the count instead of repeating "redelivery
+    // 0" at an agent that has already been handed this.
+    const envelope = renderEnvelope(render);
 
     try {
       const target = parseAddress(delivery.targetAddr);
@@ -804,6 +812,7 @@ export class Integration extends DurableObject<Env> {
           agent: target.name,
           targetAddr: target.address,
           envelope,
+          render,
           redelivery: delivery.attempts > 0,
         });
         if (result.status === "no_route") throw new Error("no_route");
@@ -814,6 +823,7 @@ export class Integration extends DurableObject<Env> {
           deliveryId: delivery.id,
           org: meta.org,
           envelope,
+          render,
           redelivery: delivery.attempts > 0,
         });
         if (result.queued === 0) throw new Error("no_route");
