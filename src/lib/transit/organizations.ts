@@ -60,6 +60,45 @@ export async function organizationIdBySlug(
   return (await organizationBySlug(db, slug))?.id ?? null;
 }
 
+/**
+ * Resolves the active connection between two organization IDs, in either
+ * direction. `resolveConnectedOrganization` answers the same question from a
+ * slug the caller typed; this one answers it from two IDs already on hand —
+ * the room's organization and a member's — and is the authorization primitive
+ * for cross-organization room membership.
+ */
+export async function connectedOrganizationById(
+  db: D1Database,
+  orgId: string,
+  peerOrgId: string,
+): Promise<{ connectionId: string; peerSlug: string } | null> {
+  if (orgId === peerOrgId) return null;
+  const [left, right] = organizationPair(orgId, peerOrgId);
+  const row = await db
+    .prepare(
+      `SELECT c.id AS connection_id, peer.slug AS peer_slug
+       FROM organization_connection c
+       JOIN organization peer ON peer.id = ?
+       WHERE c.org_a_id = ? AND c.org_b_id = ? AND c.status = 'active'
+       LIMIT 1`,
+    )
+    .bind(peerOrgId, left, right)
+    .first<{ connection_id: string; peer_slug: string }>();
+  if (!row) return null;
+  return { connectionId: row.connection_id, peerSlug: row.peer_slug };
+}
+
+export async function organizationSlugById(
+  db: D1Database,
+  orgId: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare("SELECT slug FROM organization WHERE id = ? LIMIT 1")
+    .bind(orgId)
+    .first<{ slug: string }>();
+  return row?.slug ?? null;
+}
+
 export async function organizationConnectionIsActive(
   db: D1Database,
   connectionId: string,
