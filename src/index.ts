@@ -771,11 +771,43 @@ app.get("/api/activity", async (context) => {
      WHERE m.org_id = ? OR m.recipient_org_id = ?
      GROUP BY m.id
      ORDER BY m.created_at DESC
-     LIMIT 100`,
+     LIMIT 101`,
   )
     .bind(org, org)
     .all();
-  return context.json({ activity: activity.results });
+  // The feed is a window, so the tiles cannot be derived from it: counting
+  // `dead` over the newest 100 messages hides every dead letter older than
+  // them, which is a health number that cannot fail. Count over the whole
+  // 24-hour window instead, and say when the feed itself is clipped.
+  const since = Date.now() - 24 * 60 * 60_000;
+  const window = await context.env.DB.prepare(
+    `SELECT COUNT(*) AS deliveries,
+            SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) AS dead,
+            SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued
+     FROM (
+       SELECT CASE WHEN SUM(CASE WHEN d.status = 'dead' THEN 1 ELSE 0 END) > 0
+                     THEN 'dead'
+                   WHEN SUM(CASE WHEN d.status = 'queued' THEN 1 ELSE 0 END) > 0
+                     THEN 'queued'
+                   ELSE 'injected'
+              END AS status
+       FROM message m
+       LEFT JOIN message_delivery d ON d.message_id = m.id
+       WHERE (m.org_id = ? OR m.recipient_org_id = ?) AND m.created_at >= ?
+       GROUP BY m.id
+     )`,
+  )
+    .bind(org, org, since)
+    .first<{ deliveries: number; dead: number | null; queued: number | null }>();
+  return context.json({
+    activity: activity.results.slice(0, 100),
+    truncated: activity.results.length > 100,
+    window: {
+      deliveries_24h: window?.deliveries ?? 0,
+      dead_24h: window?.dead ?? 0,
+      queued_24h: window?.queued ?? 0,
+    },
+  });
 });
 
 app.get("/api/rooms", async (context) => {

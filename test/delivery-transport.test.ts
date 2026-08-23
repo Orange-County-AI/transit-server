@@ -201,13 +201,17 @@ async function storedDelivery(deliveryId: string): Promise<StoredDelivery> {
 }
 
 // Read from D1 rather than DO storage: the point of the counters is what an
-// operator can see.
-function deliveryCounts(deliveryId: string) {
-  return env.DB.prepare(
+// operator can see. A missing row reports zeroes so a poll retries with a
+// readable diff instead of throwing on null.
+async function deliveryCounts(
+  deliveryId: string,
+): Promise<{ attempts: number; injections: number }> {
+  const row = await env.DB.prepare(
     "SELECT attempts, injections FROM integration_delivery WHERE id = ?",
   )
     .bind(deliveryId)
     .first<{ attempts: number; injections: number }>();
+  return row ?? { attempts: 0, injections: 0 };
 }
 
 describe("delivery transport reporting", () => {
