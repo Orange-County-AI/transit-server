@@ -51,6 +51,7 @@ type adapterFrame struct {
 	Address       string `json:"address,omitempty"`
 	Generation    int    `json:"generation,omitempty"`
 	Name          string `json:"name,omitempty"`
+	PaneID        string `json:"pane_id,omitempty"`
 	RegisterError string `json:"error,omitempty"`
 }
 
@@ -156,6 +157,16 @@ func configuredAgentName() string {
 		}
 	}
 	return ""
+}
+
+// agentPaneID is the Herdr pane this session occupies, when it has one. The
+// monitor inherits it from the Claude process, which inherits it from Herdr.
+// Without it the daemon cannot tell that this adapter belongs to a pane that
+// already has a name, so it mints a new one and the agent ends up listed
+// twice — once as its pane and once as the adapter, with deliveries taking
+// whichever path the sender happened to address.
+func agentPaneID() string {
+	return strings.TrimSpace(os.Getenv("HERDR_PANE_ID"))
 }
 
 func runAdapterContext(ctx context.Context, args []string, options adapterOptions) error {
@@ -301,6 +312,7 @@ func serveClaudeAdapterConnection(ctx context.Context, connection net.Conn, stat
 		Title:     title,
 		Status:    "idle",
 		Name:      configuredAgentName(),
+		PaneID:    agentPaneID(),
 	}); err != nil {
 		return fmt.Errorf("register adapter: %w", err)
 	}

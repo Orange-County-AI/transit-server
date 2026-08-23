@@ -121,6 +121,8 @@ func TestAdapterRoundTripWaitsForTranscriptReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv("HERDR_PANE_ID", "wDR:pH")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var stdout bytes.Buffer
@@ -151,6 +153,12 @@ func TestAdapterRoundTripWaitsForTranscriptReceipt(t *testing.T) {
 	}
 	if register.Type != "register" || register.Proto != 1 || register.Harness != claudeHarness || register.SessionID != "session-1" || register.PID == 0 || register.CWD != dir || register.Title != "Transit agent messages" || register.Status != "idle" {
 		t.Fatalf("register = %#v", register)
+	}
+	// Without the pane, the daemon cannot see that this session already has a
+	// name in Herdr, mints one instead, and lists the agent twice — once as
+	// its pane and once as its adapter.
+	if register.PaneID != "wDR:pH" {
+		t.Fatalf("register pane_id = %q, want the pane from HERDR_PANE_ID", register.PaneID)
 	}
 	if err := encoder.Encode(adapterFrame{Type: "registered", Capability: "capability"}); err != nil {
 		t.Fatal(err)
