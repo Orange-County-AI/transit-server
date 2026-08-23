@@ -1,4 +1,4 @@
-import { SELF, env } from "cloudflare:test";
+import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { hmacSign } from "../src/lib/transit/crypto";
 import { signedIngestPayload } from "../src/lib/transit/ingest";
@@ -124,6 +124,82 @@ function deliveryRow(id: string, target: string) {
     .first<{ status: string; via: string | null }>();
 }
 
+// Creates a signed ingest source and posts one event to it, returning the
+// delivery id the integration queued for the agent.
+async function ingestOne(
+  cookie: string,
+  source: string,
+  target: string,
+  key: string,
+): Promise<string> {
+  const created = await SELF.fetch(`${ORIGIN}/api/sources`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN, cookie },
+    body: JSON.stringify({
+      source,
+      target_addr: target,
+      reply_url_prefixes: ["https://receiver.example/transit/"],
+      instructions: "Report every alert.",
+    }),
+  });
+  expect(created.status, await created.clone().text()).toBe(201);
+  const { secret } = await created.json<{ secret: string }>();
+
+  const payload = JSON.stringify({
+    schema: "transit.ingest/1",
+    event_key: key,
+    conversation_id: `conversation-${key}`,
+    user: "Build system",
+    content: "Build failed",
+  });
+  const timestamp = String(Math.floor(Date.now() / 1_000));
+  const signature = await hmacSign(
+    secret,
+    signedIngestPayload(timestamp, new TextEncoder().encode(payload)),
+  );
+  const ingested = await SELF.fetch(`${ORIGIN}/ingest/${source}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "Transit-Timestamp": timestamp,
+      "Transit-Signature": `v1=${signature}`,
+    },
+    body: payload,
+  });
+  expect(ingested.status).toBe(202);
+  const { delivery_id: deliveryId } = await ingested.json<{ delivery_id: string }>();
+  return deliveryId;
+}
+
+// The Integration DO that owns a delivery, reached the same way the HostHub
+// reaches it: by the integration id recorded against the event.
+async function integrationFor(deliveryId: string) {
+  const row = await env.DB.prepare(
+    `SELECT e.integration_id AS id, i.org_id AS org
+     FROM integration_delivery d
+     JOIN integration_event e ON e.id = d.event_id
+     JOIN integration i ON i.id = e.integration_id
+     WHERE d.id = ?`,
+  )
+    .bind(deliveryId)
+    .first<{ id: string; org: string }>();
+  return env.INTEGRATION.getByName(`org:${row!.org}:integration:${row!.id}`);
+}
+
+type StoredDelivery = {
+  attempts: number;
+  nextAttemptAt?: number;
+  injectedVia?: string;
+};
+
+async function storedDelivery(deliveryId: string): Promise<StoredDelivery> {
+  const stub = await integrationFor(deliveryId);
+  const record = await runInDurableObject(stub, (_instance, state) =>
+    state.storage.get<StoredDelivery>(`delivery:${deliveryId}`),
+  );
+  return record!;
+}
+
 describe("delivery transport reporting", () => {
   // Both delivery paths acked identically, so the ledger could say a message
   // was injected but never which transport carried it. Answering that per
@@ -235,5 +311,99 @@ describe("delivery transport reporting", () => {
     const response = await SELF.fetch(`${ORIGIN}/api/deliveries`, { headers: { cookie } });
     const { deliveries } = await response.json<{ deliveries: Record<string, unknown>[] }>();
     expect(deliveries.find((row) => row.id === deliveryId)).toMatchObject({ via: "adapter" });
+  });
+});
+
+describe("channel redelivery", () => {
+  // Nothing ever marks a channel delivery dead, so an unsettled one used to be
+  // re-injected forever. A native adapter's ack is the receipt that ends it:
+  // the envelope is durably queued in the session, and sending it again only
+  // invites a second reply to one message.
+  it("stops redelivering once an adapter has taken the envelope", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["alice"]);
+
+    const deliveryId = await ingestOne(cookie, "held-source", "alice@titan", "held-event");
+    expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+    frames.send({ t: "deliver_ack", id: deliveryId, agent: "alice", via: "adapter" });
+
+    await expect
+      .poll(() => storedDelivery(deliveryId))
+      .toMatchObject({ injectedVia: "adapter", nextAttemptAt: undefined, attempts: 1 });
+
+    // Firing the alarm is the real redelivery trigger; a suspended delivery
+    // must survive it untouched.
+    const stub = await integrationFor(deliveryId);
+    await runDurableObjectAlarm(stub);
+    expect(await storedDelivery(deliveryId)).toMatchObject({ attempts: 1 });
+
+    // Absence needs a barrier: a later message proves the socket was live and
+    // carried no redelivery in between.
+    const barrier = "tx_held00000001";
+    await sendAndAwaitDelivery(frames, barrier, "alice@titan", "alice@titan");
+  });
+
+  // The safety net has to stay for the transport that needs it: text typed
+  // into a pane can be cleared, closed, or never read, so a herdr delivery
+  // keeps its schedule and comes back.
+  it("keeps redelivering an envelope typed into a pane", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["bob"]);
+
+    const deliveryId = await ingestOne(cookie, "pane-source", "bob@titan", "pane-event");
+    expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+    frames.send({ t: "deliver_ack", id: deliveryId, agent: "bob", via: "herdr" });
+
+    await expect
+      .poll(() => storedDelivery(deliveryId))
+      .toMatchObject({ injectedVia: "herdr" });
+    expect((await storedDelivery(deliveryId)).nextAttemptAt).toBeTypeOf("number");
+
+    // Bring the scheduled attempt forward instead of waiting five minutes for
+    // it; the schedule is what is under test, not the clock.
+    const stub = await integrationFor(deliveryId);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const record = await state.storage.get<StoredDelivery>(`delivery:${deliveryId}`);
+      await state.storage.put(`delivery:${deliveryId}`, {
+        ...record,
+        nextAttemptAt: Date.now() - 1,
+      });
+    });
+    await runDurableObjectAlarm(stub);
+
+    expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+    expect(await storedDelivery(deliveryId)).toMatchObject({ attempts: 2 });
+  });
+
+  // Reading re-armed the schedule, so the message an agent had just opened
+  // came back at it — the "read/unsettled, do not reply twice" case seen in a
+  // live pane. A read is not a reason to re-inject what is already in hand.
+  it("does not re-arm a held envelope when the agent reads it", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["carol"]);
+
+    const deliveryId = await ingestOne(cookie, "read-source", "carol@titan", "read-event");
+    expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+    frames.send({ t: "deliver_ack", id: deliveryId, agent: "carol", via: "adapter" });
+    await expect
+      .poll(() => storedDelivery(deliveryId))
+      .toMatchObject({ injectedVia: "adapter", nextAttemptAt: undefined });
+
+    frames.send({
+      t: "rpc",
+      rid: "read-1",
+      method: "read_message",
+      params: { id: deliveryId, caller: "carol@titan" },
+    });
+    for (let read = 0; read < 8; read += 1) {
+      const frame = await frames.next();
+      if (frame.t === "rpc_result" && frame.rid === "read-1") break;
+    }
+
+    const record = await storedDelivery(deliveryId);
+    expect(record).toMatchObject({ nextAttemptAt: undefined, attempts: 1 });
   });
 });

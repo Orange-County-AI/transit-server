@@ -91,6 +91,12 @@ type DeliveryRecord = {
   lastDispatchAt?: number;
   nextAttemptAt?: number;
   readAt?: number;
+  // How and when this delivery actually reached its agent, reported by the
+  // HostHub from the daemon's wire ack. A native adapter's ack means the
+  // envelope is durably queued inside the agent's session, which is a
+  // stronger fact than "typed into a pane" and the one that ends redelivery.
+  injectedAt?: number;
+  injectedVia?: string;
   settledAt?: number;
   lastError?: string;
 };
@@ -457,6 +463,34 @@ export class Integration extends DurableObject<Env> {
     }
   }
 
+  /**
+   * The HostHub reports how a dispatched delivery actually reached its agent,
+   * taken from the daemon's wire ack. This object queues deliveries but never
+   * sees the socket that drains them, so this is the only way it can learn the
+   * difference between "sent to a host" and "sitting in an agent's session".
+   *
+   * At-least-once acks make this idempotent by construction: a repeat of the
+   * transport we already recorded changes nothing.
+   */
+  async recordInjection(
+    deliveryId: string,
+    targetAddr: string,
+    via: string,
+  ): Promise<void> {
+    const delivery = await this.ctx.storage.get<DeliveryRecord>(
+      `delivery:${deliveryId}`,
+    );
+    if (!delivery || delivery.targetAddr !== targetAddr) return;
+    if (delivery.settledAt !== undefined || delivery.status === "dead") return;
+    if (delivery.injectedVia === via) return;
+    delivery.injectedVia = via;
+    delivery.injectedAt = Date.now();
+    // Only suspension is applied here. Leaving a live schedule untouched keeps
+    // an ack from silently postponing a retry that was already due.
+    if (this.sessionHeld(delivery)) delivery.nextAttemptAt = undefined;
+    await this.ctx.storage.put(`delivery:${deliveryId}`, delivery);
+  }
+
   async markHandled(deliveryId: string, caller: string): Promise<{ duplicate: boolean }> {
     const meta = await this.requireMeta();
     const delivery = await this.requireDelivery(deliveryId);
@@ -782,13 +816,15 @@ export class Integration extends DurableObject<Env> {
       delivery.lastError = error instanceof Error ? error.message : String(error);
       if (delivery.status === "pending") delivery.status = "pending";
     }
-    delivery.nextAttemptAt = Date.now() + this.redeliveryDelay(delivery);
+    this.armRedelivery(delivery);
     await this.ctx.storage.put(`delivery:${delivery.id}`, delivery);
     this.background(
       "integration_dispatch_write_failed",
       this.deliveryStatement(delivery).run(),
     );
-    await this.scheduleAt(delivery.nextAttemptAt);
+    if (delivery.nextAttemptAt !== undefined) {
+      await this.scheduleAt(delivery.nextAttemptAt);
+    }
   }
 
   private redeliveryDelay(delivery: DeliveryRecord): number {
@@ -800,10 +836,34 @@ export class Integration extends DurableObject<Env> {
     );
   }
 
+  /**
+   * A delivery whose envelope is durably queued inside its agent's session
+   * needs no further injection: the agent has it, and re-sending only invites
+   * a second reply to one message. Redelivery exists for the deliveries that
+   * never landed, so it stays armed for every other transport — a pane the
+   * daemon typed into can lose the text, and an unacked dispatch never
+   * arrived at all. Settlement is still owed either way.
+   *
+   * Room fan-out is deliberately excluded: one member's adapter acking says
+   * nothing about the others, so those keep the conservative schedule.
+   */
+  private sessionHeld(delivery: DeliveryRecord): boolean {
+    if (delivery.injectedVia !== "adapter") return false;
+    return parseAddress(delivery.targetAddr).kind === "agent";
+  }
+
+  private armRedelivery(delivery: DeliveryRecord): void {
+    delivery.nextAttemptAt = this.sessionHeld(delivery)
+      ? undefined
+      : Date.now() + this.redeliveryDelay(delivery);
+  }
+
   private async scheduleDelivery(delivery: DeliveryRecord): Promise<void> {
-    delivery.nextAttemptAt = Date.now() + this.redeliveryDelay(delivery);
+    this.armRedelivery(delivery);
     await this.ctx.storage.put(`delivery:${delivery.id}`, delivery);
-    await this.scheduleAt(delivery.nextAttemptAt);
+    if (delivery.nextAttemptAt !== undefined) {
+      await this.scheduleAt(delivery.nextAttemptAt);
+    }
   }
 
   private async scheduleAt(at: number): Promise<void> {

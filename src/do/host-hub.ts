@@ -980,6 +980,13 @@ export class HostHub extends DurableObject<Env> {
           .bind(via, messageId)
           .run(),
       );
+      // Tell the owning integration that the envelope is in the agent's
+      // session, so it stops redelivering a message that already arrived.
+      // An ack must never fail on this, so it takes the background seam.
+      this.background(
+        "channel_injection_report_failed",
+        this.reportInjection(item.org, messageId, item.targetAddr, via),
+      );
     }
     if (item.roomName && item.roomSeq !== undefined) {
       try {
@@ -1150,7 +1157,7 @@ export class HostHub extends DurableObject<Env> {
   }
 
   private async integrationForDelivery(
-    identity: HostIdentity,
+    org: string,
     deliveryId: string,
   ): Promise<string> {
     const row = await this.env.DB.prepare(
@@ -1160,10 +1167,22 @@ export class HostHub extends DurableObject<Env> {
        JOIN integration i ON i.id = e.integration_id
        WHERE d.id = ? AND i.org_id = ? LIMIT 1`,
     )
-      .bind(deliveryId, identity.org)
+      .bind(deliveryId, org)
       .first<{ integration_id: string }>();
     if (!row) throw new Error("delivery not found");
     return row.integration_id;
+  }
+
+  private async reportInjection(
+    org: string,
+    deliveryId: string,
+    targetAddr: string,
+    via: string,
+  ): Promise<void> {
+    const integrationId = await this.integrationForDelivery(org, deliveryId);
+    await this.env.INTEGRATION.getByName(
+      `org:${org}:integration:${integrationId}`,
+    ).recordInjection(deliveryId, targetAddr, via);
   }
 
   private async handleRpc(
@@ -1179,7 +1198,7 @@ export class HostHub extends DurableObject<Env> {
         if (typeof params.id !== "string") throw new Error("id is required");
         if (params.id.startsWith("dlv_")) {
           const caller = await this.rpcCaller(identity, params);
-          const integrationId = await this.integrationForDelivery(identity, params.id);
+          const integrationId = await this.integrationForDelivery(identity.org, params.id);
           result = await this.env.INTEGRATION.getByName(
             `org:${identity.org}:integration:${integrationId}`,
           ).readMessage(params.id, caller);
@@ -1212,7 +1231,7 @@ export class HostHub extends DurableObject<Env> {
         }
         const caller = await this.rpcCaller(identity, params);
         const integrationId = await this.integrationForDelivery(
-          identity,
+          identity.org,
           params.delivery_id,
         );
         const replyMode =
@@ -1234,7 +1253,7 @@ export class HostHub extends DurableObject<Env> {
         }
         const caller = await this.rpcCaller(identity, params);
         const integrationId = await this.integrationForDelivery(
-          identity,
+          identity.org,
           params.delivery_id,
         );
         result = await this.env.INTEGRATION.getByName(
