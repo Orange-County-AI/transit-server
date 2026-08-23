@@ -71,6 +71,26 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 		return "invalid_delivery_mode", true, modeErr
 	}
 	if adapter := d.nativeAdapterByName(frame.Agent); adapter != nil && mode != "shadow" {
+		// A native injection is not gentler than typing into the pane, it is
+		// only quieter: measured twice on 2026-08-23, `pi.sendUserMessage`
+		// landing while a person had unsent input DISCARDED that input - not
+		// submitted, not preserved, gone, with the agent then reporting the
+		// draft untouched. The Herdr path has always checked the composer
+		// first; the native path skipped the check because it never types, and
+		// `require` mode makes this the only path a fleet agent has. So the
+		// same hold runs here, using the pane the adapter's agent occupies.
+		// An adapter with no Herdr pane cannot be checked and delivers as
+		// before: fail-open matches the guard's existing one-sided contract.
+		if draftGuardEnabled() {
+			if agent, found := d.localAgentByName(frame.Agent); found && agent.PaneID != "" {
+				if d.composerState(ctx, agent, frame.Envelope) == composerForeignDraft {
+					hold := draftHold{PaneID: agent.PaneID, Agent: agent.Kind, At: time.Now().UTC()}
+					d.applyDraftHold(ctx, hold)
+					return "draft_busy", true, fmt.Errorf("%s has unsent input in pane %s", hold.Agent, hold.PaneID)
+				}
+				d.releaseDraftHold(agent.PaneID)
+			}
+		}
 		code, retryable, err := d.deliverNative(ctx, adapter, frame.ID, frame.Envelope)
 		if err != nil {
 			return code, retryable, err

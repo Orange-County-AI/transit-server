@@ -429,3 +429,55 @@ func TestDeliverFailsOpenWithoutAReadableComposer(t *testing.T) {
 		})
 	}
 }
+
+// The native adapter path used to skip the composer check entirely, on the
+// assumption that injecting is gentler than typing. Measured on 2026-08-23 it
+// is not: an injection landing while a person had unsent input DISCARDED that
+// input silently. `require` mode makes this the only path a fleet agent has,
+// so the guard has to cover it or it covers almost nothing.
+func TestNativeDeliveryHoldsWhileAPersonIsComposing(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-draft.txt"))
+	registerAdapterDirect(t, rig.daemon, agentFrame{
+		T: "register", Proto: agentProtocol, Harness: "omp",
+		SessionID: "01a02b49-b517-7000-a194-7a928f701e18", Name: "alice", Status: "idle",
+	})
+	if rig.daemon.nativeAdapterByName("alice") == nil {
+		t.Fatal("adapter did not register; the test would pass for the wrong reason")
+	}
+
+	frame := WireFrame{ID: "tx_guard000002", Agent: "alice", Envelope: "<transit/>"}
+	code, retryable, err := rig.daemon.deliver(context.Background(), frame)
+	if code != "draft_busy" || !retryable || err == nil {
+		t.Fatalf("native deliver into a draft = %q retryable=%t err=%v, want a retryable draft_busy hold",
+			code, retryable, err)
+	}
+	// The person's pane must be untouched: no prompt, no keys, and crucially
+	// no injection, which is the thing that ate the draft.
+	prompts, keys, _ := rig.snapshot()
+	if len(prompts) != 0 || len(keys) != 0 {
+		t.Fatalf("held native delivery touched the pane: prompts=%#v keys=%#v", prompts, keys)
+	}
+	if rig.daemon.store.IncomingRecorded(frame.ID) {
+		t.Fatal("held delivery was recorded as received")
+	}
+}
+
+// An adapter with no Herdr pane cannot be checked, and must still deliver:
+// the guard is one-sided and fail-open, and a headless adapter starving its
+// queue would be a worse bug than the one being fixed.
+func TestNativeDeliveryProceedsWithoutAPane(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-draft.txt"))
+	adapter := registerAdapterDirect(t, rig.daemon, agentFrame{
+		T: "register", Proto: agentProtocol, Harness: "omp",
+		SessionID: "01a02b49-b517-7000-a194-7a928f701e18", Name: "headless", Status: "idle",
+	})
+	// Close the socket so the injection fails immediately instead of waiting
+	// out the ack timeout: what matters here is which branch was taken, not
+	// that an absent adapter eventually times out.
+	_ = adapter.connection.Close()
+	frame := WireFrame{ID: "tx_guard000003", Agent: "headless", Envelope: "<transit/>"}
+	code, _, _ := rig.daemon.deliver(context.Background(), frame)
+	if code == "draft_busy" {
+		t.Fatal("an adapter with no pane was held on another agent's draft")
+	}
+}
