@@ -91,9 +91,9 @@ func TestNumericHostSlug(t *testing.T) {
 
 func TestParseAgentAddressRoomForms(t *testing.T) {
 	tests := []struct {
-		address  string
-		name     string
-		host     string
+		address   string
+		name      string
+		host      string
 		wantError bool
 	}{
 		{address: "#ops", name: "#ops"},
