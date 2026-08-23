@@ -515,3 +515,50 @@ func TestAdapterByProcessFindsAncestor(t *testing.T) {
 		t.Fatal("unrelated process resolved to native adapter")
 	}
 }
+
+// A split identity - an adapter registered under one name while the Herdr
+// roster advertises another - was invisible from the CLI, because status
+// reported only the roster count. Proving it took a fleet config change and
+// delivery forensics; it must take one status read.
+func TestStatusReportsLiveAdaptersAndMode(t *testing.T) {
+	t.Setenv("TRANSIT_DELIVERY_MODE", "require")
+	d, _ := newAdapterTestDaemon(t, "require", []HerdrAgent{
+		{Name: "omp-4jer", PaneID: "w1:p1", Kind: "omp", Status: "idle"},
+	}, new(int))
+	registerAdapterDirect(t, d, agentFrame{
+		T: "register", Proto: agentProtocol, Harness: "omp",
+		SessionID: "01a02b49-b517-7000-a194-7a928f701e18", Name: "omp-4maz", Status: "idle",
+	})
+
+	response := d.statusResponse()
+	if response["delivery_mode"] != "require" {
+		t.Fatalf("delivery_mode = %v, want require", response["delivery_mode"])
+	}
+	adapters, ok := response["adapters"].([]map[string]any)
+	if !ok || len(adapters) != 1 {
+		t.Fatalf("adapters = %#v", response["adapters"])
+	}
+	row := adapters[0]
+	// The whole point: the name that RECEIVES is readable, so it can be
+	// compared against the name the agent advertises instead of inferred.
+	if row["name"] != "omp-4maz" || row["harness"] != "omp" || row["named_by"] != "user" {
+		t.Fatalf("adapter row = %#v", row)
+	}
+	if row["session_id"] != "01a02b49-b517-7000-a194-7a928f701e18" {
+		t.Fatalf("adapter session = %#v", row["session_id"])
+	}
+}
+
+// An agent with no adapter reports an empty list rather than omitting the
+// field: "no adapters" and "this daemon cannot tell you" must not look alike.
+func TestStatusReportsEmptyAdapterList(t *testing.T) {
+	d, _ := newAdapterTestDaemon(t, "prefer", nil, new(int))
+	response := d.statusResponse()
+	adapters, ok := response["adapters"].([]map[string]any)
+	if !ok || len(adapters) != 0 {
+		t.Fatalf("adapters = %#v", response["adapters"])
+	}
+	if response["delivery_mode"] != "prefer" {
+		t.Fatalf("delivery_mode = %v, want prefer", response["delivery_mode"])
+	}
+}

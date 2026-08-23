@@ -194,9 +194,15 @@ func runStatus(args []string) error {
 		fmt.Println("Transit daemon kicked")
 		return nil
 	}
-	fmt.Printf("host: %v\nconnected: %v\npaused: %v\nagents: %v\noutbox: %v\ndead: %v\nlast error: %v\n",
-		response["host"], response["connected"], response["paused"], response["agents"],
-		response["outbox"], response["dead"], response["last_error"])
+	fmt.Printf("host: %v\nconnected: %v\npaused: %v\nmode: %v\nagents: %v\noutbox: %v\ndead: %v\nlast error: %v\n",
+		response["host"], response["connected"], response["paused"], response["delivery_mode"],
+		response["agents"], response["outbox"], response["dead"], response["last_error"])
+	// The adapter rows answer "who actually receives natively", which the agent
+	// count cannot: an agent present in the Herdr roster and absent here is one
+	// whose delivery falls back to typing into its pane.
+	for _, adapter := range adapterRows(response) {
+		fmt.Printf("adapter %s (%s, %s, pid %d)\n", adapter.Name, adapter.Harness, adapter.NamedBy, adapter.PID)
+	}
 	for _, hold := range draftHoldRows(response) {
 		fmt.Printf("holding %s since %s\n", hold.PaneID, hold.At.Format(time.RFC3339))
 	}
@@ -215,6 +221,29 @@ func draftHoldRows(response map[string]any) []draftHold {
 		return nil
 	}
 	return holds
+}
+
+// adapterRow is the CLI's view of one live native adapter. It mirrors
+// draftHoldRows: a malformed or absent list prints nothing rather than
+// failing a status read, because status is what an operator reaches for when
+// something is already wrong.
+type adapterRow struct {
+	Name    string `json:"name"`
+	Harness string `json:"harness"`
+	NamedBy string `json:"named_by"`
+	PID     int    `json:"pid"`
+}
+
+func adapterRows(response map[string]any) []adapterRow {
+	raw, err := json.Marshal(response["adapters"])
+	if err != nil {
+		return nil
+	}
+	var adapters []adapterRow
+	if err := json.Unmarshal(raw, &adapters); err != nil {
+		return nil
+	}
+	return adapters
 }
 
 func startDetachedDaemon() error {

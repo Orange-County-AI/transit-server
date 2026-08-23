@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -181,14 +182,37 @@ func (d *Daemon) statusResponse() map[string]any {
 	if err != nil {
 		return failure("store_error", err.Error())
 	}
+	mode, modeErr := deliveryMode(d.cfg)
+	if modeErr != nil {
+		mode = "invalid"
+	}
 	d.mu.RLock()
+	// `agents` counts the HERDR roster, which is not the set that receives
+	// through a native adapter. Reporting only that number made a split
+	// identity - an adapter registered under one name while its agent
+	// advertises another - invisible from the CLI: every layer reported
+	// success and deliveries silently took the Herdr path, which types into
+	// the pane. `adapters` is the set that actually answers, so the two can be
+	// compared directly instead of inferred from delivery forensics.
+	adapters := make([]map[string]any, 0, len(d.nativeByName))
+	for name, adapter := range d.nativeByName {
+		adapters = append(adapters, map[string]any{
+			"name": name, "harness": adapter.harness, "session_id": adapter.sessionID,
+			"pid": adapter.pid, "status": adapter.status, "named_by": adapter.namedBy,
+			"generation": adapter.generation,
+		})
+	}
 	response := map[string]any{
 		"host": d.cfg.Host, "connected": d.connected, "paused": d.paused,
 		"last_error": d.lastError, "agents": len(d.roster),
 		"uptime_seconds": int64(time.Since(d.started).Seconds()),
 		"outbox":         outbox, "dead": dead,
+		"delivery_mode": mode, "adapters": adapters,
 	}
 	d.mu.RUnlock()
+	sort.Slice(adapters, func(i, j int) bool {
+		return adapters[i]["name"].(string) < adapters[j]["name"].(string)
+	})
 	response["draft_holds"] = d.draftHolds()
 	return success(response)
 }
