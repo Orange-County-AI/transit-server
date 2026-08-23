@@ -41,15 +41,15 @@ func (connection *wireConnection) write(ctx context.Context, frame WireFrame) er
 	return connection.conn.Write(writeCtx, websocket.MessageText, data)
 }
 
-func (d *Daemon) wireLoop(ctx context.Context) {
+func (d *Daemon) wireLoop(ctx context.Context, e *enrollmentRuntime) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		err := d.wireSession(ctx)
+		err := d.wireSession(ctx, e)
 		if ctx.Err() != nil {
 			return
 		}
-		d.setLastError(err)
-		d.logf("wire disconnected: %v", err)
+		e.setLastError(err)
+		d.logf("wire disconnected (%s): %v", e.id, err)
 		delay := jitter(backoff)
 		timer := time.NewTimer(delay)
 		select {
@@ -74,13 +74,16 @@ func jitter(base time.Duration) time.Duration {
 	return time.Duration(float64(base) * factor)
 }
 
-func (d *Daemon) wireSession(ctx context.Context) error {
-	endpoint, err := wireURL(d.cfg.URL)
+func (d *Daemon) wireSession(ctx context.Context, e *enrollmentRuntime) error {
+	if e.token == "" || e.store == nil {
+		return fmt.Errorf("enrollment %s is not usable", e.id)
+	}
+	endpoint, err := wireURL(e.url)
 	if err != nil {
 		return err
 	}
 	headers := make(http.Header)
-	headers.Set("Authorization", "Bearer "+d.token)
+	headers.Set("Authorization", "Bearer "+e.token)
 	connection, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		return err
@@ -89,7 +92,7 @@ func (d *Daemon) wireSession(ctx context.Context) error {
 	connection.SetReadLimit(maxWireFrameBytes)
 	wire := newWireConnection(connection)
 	if err := wire.write(ctx, WireFrame{
-		T: "hello", Proto: wireProtocol, DaemonVer: buildVersion(), Host: d.cfg.Host,
+		T: "hello", Proto: wireProtocol, DaemonVer: buildVersion(), Host: e.host,
 	}); err != nil {
 		return err
 	}
@@ -112,19 +115,19 @@ func (d *Daemon) wireSession(ctx context.Context) error {
 		return fmt.Errorf("unexpected hello response %q", hello.T)
 	}
 
-	d.setConnection(wire)
-	d.setLastError(nil)
-	defer d.setConnection(nil)
-	d.logf("connected as %s (%s)", d.cfg.Host, hello.HostID)
-	if err := d.sendRoster(ctx); err != nil {
+	e.setConnection(wire)
+	e.setLastError(nil)
+	defer e.setConnection(nil)
+	d.logf("connected as %s (%s) for %s", e.host, hello.HostID, e.id)
+	if err := d.sendRoster(ctx, e); err != nil {
 		return err
 	}
-	d.notifyOutbox()
+	e.notifyOutbox()
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
 	go d.heartbeatLoop(heartbeatCtx, wire)
-	return d.readWire(ctx, connection, wire)
+	return d.readWire(ctx, e, connection, wire)
 }
 
 func (d *Daemon) heartbeatLoop(ctx context.Context, connection *wireConnection) {
@@ -142,7 +145,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context, connection *wireConnection) 
 	}
 }
 
-func (d *Daemon) readWire(ctx context.Context, connection *websocket.Conn, writer *wireConnection) error {
+func (d *Daemon) readWire(ctx context.Context, e *enrollmentRuntime, connection *websocket.Conn, writer *wireConnection) error {
 	for {
 		messageType, data, err := connection.Read(ctx)
 		if err != nil {
@@ -157,7 +160,7 @@ func (d *Daemon) readWire(ctx context.Context, connection *websocket.Conn, write
 		}
 		switch frame.T {
 		case "deliver":
-			go d.handleIncoming(ctx, writer, frame)
+			go d.handleIncoming(ctx, e, writer, frame)
 		case "send_ack":
 			d.resolveCommit(frame.ID, "", nil)
 		case "send_nak":
@@ -173,8 +176,11 @@ func (d *Daemon) readWire(ctx context.Context, connection *websocket.Conn, write
 	}
 }
 
-func (d *Daemon) handleIncoming(ctx context.Context, connection *wireConnection, frame WireFrame) {
-	code, retryable, err := d.deliver(ctx, frame)
+// handleIncoming answers on the connection the delivery arrived on, and
+// resolves the target inside that connection's organization: the same agent
+// name can exist in two of them.
+func (d *Daemon) handleIncoming(ctx context.Context, e *enrollmentRuntime, connection *wireConnection, frame WireFrame) {
+	code, retryable, err := d.deliver(ctx, e, frame)
 	if err == nil {
 		if writeErr := connection.write(ctx, WireFrame{
 			T: "deliver_ack", ID: frame.ID, Agent: frame.Agent,
@@ -191,7 +197,7 @@ func (d *Daemon) handleIncoming(ctx context.Context, connection *wireConnection,
 	}
 }
 
-func (d *Daemon) outboxLoop(ctx context.Context) {
+func (d *Daemon) outboxLoop(ctx context.Context, e *enrollmentRuntime) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -199,12 +205,12 @@ func (d *Daemon) outboxLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-		case <-d.kickOutbox:
+		case <-e.kickOutbox:
 		}
-		for ctx.Err() == nil && d.currentConnection() != nil {
-			worked, err := d.flushOne(ctx)
+		for ctx.Err() == nil && e.currentConnection() != nil {
+			worked, err := d.flushOne(ctx, e)
 			if err != nil {
-				d.logf("flush outbox: %v", err)
+				d.logf("flush outbox (%s): %v", e.id, err)
 				break
 			}
 			if !worked {
@@ -214,14 +220,17 @@ func (d *Daemon) outboxLoop(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) flushOne(ctx context.Context) (bool, error) {
-	claim, err := d.store.Claim(time.Now())
+func (d *Daemon) flushOne(ctx context.Context, e *enrollmentRuntime) (bool, error) {
+	if e.store == nil {
+		return false, nil
+	}
+	claim, err := e.store.Claim(time.Now())
 	if err != nil || claim == nil {
 		return false, err
 	}
-	connection := d.currentConnection()
+	connection := e.currentConnection()
 	if connection == nil {
-		_ = d.store.Release(claim, "offline")
+		_ = e.store.Release(claim, "offline")
 		return false, nil
 	}
 	waiter := d.registerCommit(claim.Message.ID)
@@ -232,7 +241,7 @@ func (d *Daemon) flushOne(ctx context.Context) (bool, error) {
 		TS: claim.Message.TS.UTC().Format(time.RFC3339Nano),
 	}
 	if err := connection.write(ctx, frame); err != nil {
-		_ = d.store.Release(claim, err.Error())
+		_ = e.store.Release(claim, err.Error())
 		return false, err
 	}
 	timer := time.NewTimer(10 * time.Second)
@@ -240,24 +249,24 @@ func (d *Daemon) flushOne(ctx context.Context) (bool, error) {
 	select {
 	case outcome := <-waiter:
 		if outcome.Err != nil {
-			_ = d.store.Release(claim, outcome.Err.Error())
+			_ = e.store.Release(claim, outcome.Err.Error())
 			return true, outcome.Err
 		}
 		if outcome.Code == "" {
-			return true, d.store.Ack(claim)
+			return true, e.store.Ack(claim)
 		}
 		if permanentSendNak(outcome.Code) {
-			if err := d.store.Kill(claim, outcome.Code); err != nil {
+			if err := e.store.Kill(claim, outcome.Code); err != nil {
 				return true, err
 			}
-			d.bounce(ctx, claim.Message, outcome.Code)
+			d.bounce(ctx, e, claim.Message, outcome.Code)
 			return true, nil
 		}
-		return true, d.store.Release(claim, outcome.Code)
+		return true, e.store.Release(claim, outcome.Code)
 	case <-timer.C:
-		return true, d.store.Release(claim, "send ack timeout")
+		return true, e.store.Release(claim, "send ack timeout")
 	case <-ctx.Done():
-		return false, d.store.Release(claim, ctx.Err().Error())
+		return false, e.store.Release(claim, ctx.Err().Error())
 	}
 }
 

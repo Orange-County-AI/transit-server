@@ -29,49 +29,55 @@ type draftHold struct {
 
 type Daemon struct {
 	cfg   *Config
-	token string
 	store *Store
 	herdr HerdrDriver
 
+	// enrollments are the organizations this daemon serves, one Worker socket
+	// each. A single-organization box has exactly one, called `default`, and
+	// every path below reads the list rather than special-casing it.
+	enrollments     []*enrollmentRuntime
+	enrollmentsByID map[string]*enrollmentRuntime
+
 	started time.Time
 
-	mu          sync.RWMutex
-	roster      []WireAgent
+	mu sync.RWMutex
+	// roster is the published agent list per enrollment. An agent belongs to
+	// exactly one organization, so these partition rather than overlap.
+	roster      map[string][]WireAgent
 	herdrAgents []HerdrAgent
-	rosterHash  string
-	connection  *wireConnection
-	connected   bool
 	// herdrAvailable records whether the Herdr socket answered on the most
 	// recent attempt. Herdr is optional: a box whose harnesses all register
 	// native adapters never needs it, so an outage degrades the daemon to
 	// adapter-only instead of stopping it from starting.
 	herdrAvailable bool
-	lastError      string
 	paused         bool
 	holds          map[string]draftHold
 	inflight       map[string]*deliveryFlight
 	commitWaiters  map[string][]chan sendOutcome
 	rpcWaiters     map[string]chan RPCResponse
 	adapters       map[string]*agentAdapter
-	nativeByName   map[string]*agentAdapter
-	nativeNames    map[string]nativeName
+	// nativeByName is keyed by enrollment and then by name: two organizations
+	// may each have an agent called `clem`, and one flat map would hand one
+	// organization's delivery to the other's agent.
+	nativeByName map[string]map[string]*agentAdapter
+	nativeNames  map[string]nativeName
 	// nativeTokens indexes the identity credentials by token so a client that
 	// re-presents one is recognised without scanning every record.
 	nativeTokens map[string]string
 	nextRPC      uint64
 	kickRoster   chan struct{}
-	kickOutbox   chan struct{}
 }
 
 func newDaemon(cfg *Config, token string, store *Store, herdr HerdrDriver) *Daemon {
 	d := &Daemon{
-		cfg: cfg, token: token, store: store, herdr: herdr, started: time.Now(),
+		cfg: cfg, store: store, herdr: herdr, started: time.Now(),
 		herdrAvailable: true,
 		holds:          make(map[string]draftHold), inflight: make(map[string]*deliveryFlight),
 		commitWaiters: make(map[string][]chan sendOutcome),
 		rpcWaiters:    make(map[string]chan RPCResponse), adapters: make(map[string]*agentAdapter),
-		nativeByName: make(map[string]*agentAdapter), kickRoster: make(chan struct{}, 1),
-		kickOutbox: make(chan struct{}, 1),
+		nativeByName: make(map[string]map[string]*agentAdapter), kickRoster: make(chan struct{}, 1),
+		roster:          make(map[string][]WireAgent),
+		enrollmentsByID: make(map[string]*enrollmentRuntime),
 	}
 	d.nativeNames = d.loadNativeNames()
 	d.nativeTokens = make(map[string]string, len(d.nativeNames))
@@ -80,7 +86,40 @@ func newDaemon(cfg *Config, token string, store *Store, herdr HerdrDriver) *Daem
 			d.nativeTokens[record.Token] = key
 		}
 	}
+	d.openEnrollments(token)
 	return d
+}
+
+// openEnrollments builds one runtime per configured organization. The default
+// enrollment reuses the store and token the daemon was opened with, so a
+// single-organization box keeps the spool and credential it already has. An
+// enrollment whose token or spool cannot be opened is kept with the failure
+// recorded rather than dropped: a missing credential must be visible in
+// `status`, not silently reduce the set of organizations this box serves.
+func (d *Daemon) openEnrollments(defaultToken string) {
+	entries := d.cfg.Enrollments
+	if len(entries) == 0 {
+		entries = []Enrollment{{ID: defaultEnrollment, URL: d.cfg.URL, Host: d.cfg.Host}}
+	}
+	for _, entry := range entries {
+		token, store := defaultToken, d.store
+		var failure error
+		if entry.ID != defaultEnrollment {
+			token, failure = readEnrollmentToken(entry)
+			if failure == nil {
+				store, failure = OpenStore(entry.storeRoot())
+			}
+		}
+		runtime := newEnrollmentRuntime(entry, token, store)
+		if failure != nil {
+			runtime.token = ""
+			runtime.store = nil
+			runtime.setLastError(failure)
+			d.logf("enrollment %s unavailable: %v", entry.ID, failure)
+		}
+		d.enrollments = append(d.enrollments, runtime)
+		d.enrollmentsByID[entry.ID] = runtime
+	}
 }
 
 func acquireDaemonLock(root string) (func(), error) {
@@ -147,29 +186,6 @@ func (d *Daemon) herdrReachable() bool {
 	return d.herdrAvailable
 }
 
-func (d *Daemon) setLastError(err error) {
-	d.mu.Lock()
-	if err == nil {
-		d.lastError = ""
-	} else {
-		d.lastError = err.Error()
-	}
-	d.mu.Unlock()
-}
-
-func (d *Daemon) setConnection(connection *wireConnection) {
-	d.mu.Lock()
-	d.connection = connection
-	d.connected = connection != nil
-	d.mu.Unlock()
-}
-
-func (d *Daemon) currentConnection() *wireConnection {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.connection
-}
-
 func (d *Daemon) notifyRoster() {
 	select {
 	case d.kickRoster <- struct{}{}:
@@ -177,10 +193,12 @@ func (d *Daemon) notifyRoster() {
 	}
 }
 
+// notifyOutbox wakes every enrollment's flush loop. The IPC callers that use
+// it have just enqueued into one spool, but which one is the caller's business
+// and a spurious wake costs a tick.
 func (d *Daemon) notifyOutbox() {
-	select {
-	case d.kickOutbox <- struct{}{}:
-	default:
+	for _, enrollment := range d.enrollments {
+		enrollment.notifyOutbox()
 	}
 }
 
@@ -219,8 +237,8 @@ func (d *Daemon) resolveCommit(id, code string, err error) {
 	}
 }
 
-func (d *Daemon) rpc(ctx context.Context, method string, params any) (RPCResponse, error) {
-	connection := d.currentConnection()
+func (d *Daemon) rpc(ctx context.Context, e *enrollmentRuntime, method string, params any) (RPCResponse, error) {
+	connection := e.currentConnection()
 	if connection == nil {
 		return RPCResponse{}, fmt.Errorf("Transit is offline")
 	}

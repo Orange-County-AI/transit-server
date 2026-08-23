@@ -58,7 +58,7 @@ func TestRefreshRosterPublishesAdaptersWithoutHerdr(t *testing.T) {
 		t.Fatal("herdr reported reachable through a socket that does not exist")
 	}
 	d.mu.RLock()
-	roster := append([]WireAgent(nil), d.roster...)
+	roster := append([]WireAgent(nil), d.roster[defaultEnrollment]...)
 	d.mu.RUnlock()
 	if len(roster) != 1 || roster[0].Name != "solo" {
 		t.Fatalf("roster = %#v; want the native adapter alone", roster)
@@ -74,7 +74,7 @@ func TestDeliverReportsHerdrUnavailableRatherThanAgentNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, retryable, err := d.deliverOnce(context.Background(), WireFrame{
+	code, retryable, err := d.deliverOnce(context.Background(), d.defaultEnrollmentRuntime(), WireFrame{
 		ID: "tx_herdrless01", Agent: "pane-only", Envelope: "<transit id=\"tx_herdrless01\"/>",
 	})
 	if code != "herdr_unavailable" || !retryable || err == nil {
@@ -90,7 +90,7 @@ func TestNativeDeliveryWorksWithoutHerdr(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		code, retryable, err := d.deliver(context.Background(), WireFrame{
+		code, retryable, err := d.deliver(context.Background(), d.defaultEnrollmentRuntime(), WireFrame{
 			ID: "tx_herdrless02", Agent: client.name, Envelope: "<transit id=\"tx_herdrless02\"/>",
 		})
 		if code != "" || retryable {

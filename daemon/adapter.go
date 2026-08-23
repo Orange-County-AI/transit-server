@@ -18,21 +18,48 @@ import (
 	"time"
 )
 
-// adapterCapable answers whether a name has ever presented a native adapter.
-// It is a fact the daemon recorded itself, unlike the harness kind the Herdr
-// roster carries, which the agent asserts about itself — `require` mode used
-// to refuse delivery based on that assertion. The record is persisted, so the
-// capability survives a daemon restart and an adapter that is merely
-// disconnected still holds its claim.
-func (d *Daemon) adapterCapable(name string) bool {
+// adapterCapable answers whether a name has ever presented a native adapter in
+// this organization. It is a fact the daemon recorded itself, unlike the
+// harness kind the Herdr roster carries, which the agent asserts about itself
+// — `require` mode used to refuse delivery based on that assertion. The
+// record is persisted, so the capability survives a daemon restart and an
+// adapter that is merely disconnected still holds its claim.
+func (d *Daemon) adapterCapable(enrollment, name string) bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	for _, record := range d.nativeNames {
-		if record.Name == name {
+		if record.Name == name && record.enrollmentOrDefault() == enrollment {
 			return true
 		}
 	}
 	return false
+}
+
+// nativeAdapterLocked and its setters keep the two-level map honest: an empty
+// inner map is deleted so a roster walk never sees an organization that has no
+// adapters.
+func (d *Daemon) bindNativeNameLocked(enrollment, name string, adapter *agentAdapter) {
+	byName := d.nativeByName[enrollment]
+	if byName == nil {
+		byName = make(map[string]*agentAdapter)
+		d.nativeByName[enrollment] = byName
+	}
+	byName[name] = adapter
+}
+
+func (d *Daemon) unbindNativeNameLocked(enrollment, name string, adapter *agentAdapter) {
+	byName := d.nativeByName[enrollment]
+	if byName == nil || byName[name] != adapter {
+		return
+	}
+	delete(byName, name)
+	if len(byName) == 0 {
+		delete(d.nativeByName, enrollment)
+	}
+}
+
+func (d *Daemon) nativeAdapterLocked(enrollment, name string) *agentAdapter {
+	return d.nativeByName[enrollment][name]
 }
 
 const (
@@ -66,6 +93,9 @@ type agentFrame struct {
 	// identity registered. A client that stores it and presents it again keeps
 	// its name across a session id change — which every OMP `--resume` is.
 	AgentToken string `json:"agent_token,omitempty"`
+	// Enrollment names which organization this client belongs to on a daemon
+	// that serves several. Empty means the one the box was enrolled with.
+	Enrollment string `json:"enrollment,omitempty"`
 }
 
 type nativeName struct {
@@ -73,6 +103,16 @@ type nativeName struct {
 	NamedBy    string `json:"named_by"`
 	Generation uint64 `json:"generation"`
 	Token      string `json:"token,omitempty"`
+	Enrollment string `json:"enrollment,omitempty"`
+}
+
+// enrollmentOrDefault reads a record written before enrollments existed as
+// belonging to the only organization such a daemon had.
+func (record nativeName) enrollmentOrDefault() string {
+	if record.Enrollment == "" {
+		return defaultEnrollment
+	}
+	return record.Enrollment
 }
 
 type agentDeliveryOutcome struct {
@@ -102,6 +142,7 @@ type agentAdapter struct {
 	// token is the credential handed back so the next registration can present
 	// it. Never logged and never put on the roster.
 	token      string
+	enrollment string
 	connection net.Conn
 
 	writeMu sync.Mutex
@@ -189,7 +230,7 @@ func (d *Daemon) serveAgentConnection(ctx context.Context, connection net.Conn) 
 		return
 	}
 	if err := adapter.write(agentFrame{
-		T: "registered", Agent: adapter.name, Address: adapter.name + "@" + d.cfg.Host,
+		T: "registered", Agent: adapter.name, Address: adapter.name + "@" + d.enrollmentHost(adapter.enrollment),
 		Generation: adapter.generation, Capability: adapter.capability, AgentToken: adapter.token,
 	}); err != nil {
 		d.deregisterAgentAdapter(adapter)
@@ -390,12 +431,14 @@ func (d *Daemon) nativeNameClaimErrorLocked(adapter *agentAdapter, name string) 
 	if d.adapters[adapter.key] != adapter {
 		return fmt.Errorf("agent_not_found")
 	}
+	// A name collides only inside one organization. Two of them may each have
+	// a `clem` without either being able to reach the other's.
 	for key, record := range d.nativeNames {
-		if key != adapter.key && record.Name == name {
+		if key != adapter.key && record.Name == name && record.enrollmentOrDefault() == adapter.enrollment {
 			return fmt.Errorf("name is already claimed by another native session")
 		}
 	}
-	if existing := d.nativeByName[name]; existing != nil && existing != adapter {
+	if existing := d.nativeAdapterLocked(adapter.enrollment, name); existing != nil && existing != adapter {
 		return fmt.Errorf("name is already claimed by another native session")
 	}
 	return nil
@@ -421,7 +464,8 @@ func (d *Daemon) claimNativeAdapterName(adapter *agentAdapter, name string) (add
 	// The token is the identity, not the name: a claim renames the agent and
 	// must leave the credential that recovers it alone.
 	d.nativeNames[adapter.key] = nativeName{
-		Name: name, NamedBy: "user", Generation: generation, Token: previousRecord.Token,
+		Name: name, NamedBy: "user", Generation: generation,
+		Token: previousRecord.Token, Enrollment: adapter.enrollment,
 	}
 	if err := d.saveNativeNamesLocked(); err != nil {
 		adapter.name = previousName
@@ -431,13 +475,12 @@ func (d *Daemon) claimNativeAdapterName(adapter *agentAdapter, name string) (add
 		d.mu.Unlock()
 		return "", err
 	}
-	if d.nativeByName[previousName] == adapter {
-		delete(d.nativeByName, previousName)
-	}
-	d.nativeByName[name] = adapter
+	d.unbindNativeNameLocked(adapter.enrollment, previousName, adapter)
+	d.bindNativeNameLocked(adapter.enrollment, name, adapter)
+	host := d.enrollmentHostLocked(adapter.enrollment)
 	d.mu.Unlock()
 	d.notifyRoster()
-	return name + "@" + d.cfg.Host, nil
+	return name + "@" + host, nil
 }
 
 func (adapter *agentAdapter) write(frame agentFrame) error {
@@ -510,16 +553,23 @@ var harnessPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // became a different agent. Session id is the last resort rather than the
 // rule, because OMP mints a fresh one on every `--resume`, which is why one
 // agent wore three addresses in a single afternoon.
-func (d *Daemon) adapterKeyLocked(frame agentFrame) (key, anchor string) {
+// Keys are prefixed with the organization: `clem` in one is not `clem` in
+// another, and a flat namespace would let a registration in one organization
+// inherit a record from the other.
+func (d *Daemon) adapterKeyLocked(frame agentFrame, enrollment string) (key, anchor string) {
 	if frame.Name != "" {
-		return "name:" + frame.Name, "name"
+		return enrollment + "|name:" + frame.Name, "name"
 	}
 	if frame.AgentToken != "" {
 		if stored, found := d.nativeTokens[frame.AgentToken]; found {
-			return stored, "token"
+			// A token issued to one organization cannot resolve an identity in
+			// another, however the client labels itself.
+			if d.nativeNames[stored].enrollmentOrDefault() == enrollment {
+				return stored, "token"
+			}
 		}
 	}
-	return "session:" + frame.SessionID, "session"
+	return enrollment + "|session:" + frame.SessionID, "session"
 }
 
 func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, connection net.Conn) (*agentAdapter, string, string) {
@@ -532,13 +582,23 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	if frame.Name != "" && (!namePattern.MatchString(frame.Name) || reservedNames[frame.Name]) {
 		return nil, "invalid_name", "name is invalid or reserved"
 	}
+	enrollment := defaultEnrollment
+	if frame.Enrollment != "" {
+		if d.enrollmentsByID[frame.Enrollment] == nil {
+			return nil, "unknown_enrollment", "no such enrollment on this daemon"
+		}
+		enrollment = frame.Enrollment
+	} else if runtime := d.defaultEnrollmentRuntime(); runtime != nil {
+		enrollment = runtime.id
+	}
 	paneAgent, hasPaneAgent := d.localAgentByPane(frame.PaneID)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	key, anchor := d.adapterKeyLocked(frame)
+	key, anchor := d.adapterKeyLocked(frame, enrollment)
 	nameRecord, hasName := d.nativeNames[key]
+	nameRecord.Enrollment = enrollment
 	// displaced are the adapters this registration takes over from: the same
 	// identity reconnecting, and — for a declared name — the older keys that
 	// held that name before the launcher started declaring it.
@@ -553,7 +613,7 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 		// when the key was harness and session id. Absorb its generation and
 		// drop the stale key rather than refusing the launcher's own name.
 		for otherKey, other := range d.nativeNames {
-			if otherKey == key || other.Name != frame.Name {
+			if otherKey == key || other.Name != frame.Name || other.enrollmentOrDefault() != enrollment {
 				continue
 			}
 			if live := d.adapters[otherKey]; live != nil {
@@ -578,20 +638,20 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 		if hasPaneAgent && paneAgent.Name != "" {
 			claimed := false
 			for otherKey, other := range d.nativeNames {
-				if otherKey != key && other.Name == paneAgent.Name {
+				if otherKey != key && other.Name == paneAgent.Name && other.enrollmentOrDefault() == enrollment {
 					claimed = true
 					break
 				}
 			}
 			if !claimed {
-				nameRecord = nativeName{Name: paneAgent.Name, NamedBy: "herdr"}
+				nameRecord = nativeName{Name: paneAgent.Name, NamedBy: "herdr", Enrollment: enrollment}
 				adopted = true
 			}
 		}
 		if !adopted {
 			taken := make(map[string]bool, len(d.nativeNames)+len(d.herdrAgents))
 			for otherKey, other := range d.nativeNames {
-				if otherKey != key && other.Name != "" {
+				if otherKey != key && other.Name != "" && other.enrollmentOrDefault() == enrollment {
 					taken[other.Name] = true
 				}
 			}
@@ -604,7 +664,7 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 			if err != nil {
 				return nil, "name_allocation_failed", err.Error()
 			}
-			nameRecord = nativeName{Name: name, NamedBy: "auto"}
+			nameRecord = nativeName{Name: name, NamedBy: "auto", Enrollment: enrollment}
 		}
 	}
 
@@ -625,9 +685,9 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 		key: key, harness: frame.Harness, sessionID: frame.SessionID, pid: pid, pidStart: start,
 		cwd: frame.CWD, title: frame.Title, status: frame.Status, name: nameRecord.Name, namedBy: nameRecord.NamedBy,
 		generation: generation, capability: capability, anchor: anchor, token: nameRecord.Token,
-		connection: connection, waiters: make(map[string]chan agentDeliveryOutcome),
+		enrollment: enrollment, connection: connection, waiters: make(map[string]chan agentDeliveryOutcome),
 	}
-	if held := d.nativeByName[nameRecord.Name]; held != nil && !containsAdapter(displaced, held) {
+	if held := d.nativeAdapterLocked(enrollment, nameRecord.Name); held != nil && !containsAdapter(displaced, held) {
 		return nil, "name_taken", "name is already registered by another native session"
 	}
 	d.nativeNames[key] = nameRecord
@@ -637,11 +697,11 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	}
 	d.adapters[key] = adapter
 	for _, old := range displaced {
-		if old.name != nameRecord.Name && d.nativeByName[old.name] == old {
-			delete(d.nativeByName, old.name)
+		if old.name != nameRecord.Name {
+			d.unbindNativeNameLocked(old.enrollment, old.name, old)
 		}
 	}
-	d.nativeByName[nameRecord.Name] = adapter
+	d.bindNativeNameLocked(enrollment, nameRecord.Name, adapter)
 	for _, old := range displaced {
 		_ = old.connection.Close()
 	}
@@ -662,17 +722,15 @@ func (d *Daemon) deregisterAgentAdapter(adapter *agentAdapter) {
 	d.mu.Lock()
 	if d.adapters[adapter.key] == adapter {
 		delete(d.adapters, adapter.key)
-		if d.nativeByName[adapter.name] == adapter {
-			delete(d.nativeByName, adapter.name)
-		}
+		d.unbindNativeNameLocked(adapter.enrollment, adapter.name, adapter)
 	}
 	d.mu.Unlock()
 	d.notifyRoster()
 }
 
-func (d *Daemon) nativeAdapterByName(name string) *agentAdapter {
+func (d *Daemon) nativeAdapterByName(enrollment, name string) *agentAdapter {
 	d.mu.RLock()
-	adapter := d.nativeByName[name]
+	adapter := d.nativeAdapterLocked(enrollment, name)
 	d.mu.RUnlock()
 	return adapter
 }

@@ -49,7 +49,7 @@ func TestDeliverCoalescesConcurrentAttemptsForSameAgent(t *testing.T) {
 	frame := WireFrame{ID: "tx_coalesce01", Agent: "alice", Envelope: "<transit/>"}
 	outcomes := make(chan string, 2)
 	deliver := func() {
-		code, _, err := d.deliver(context.Background(), frame)
+		code, _, err := d.deliver(context.Background(), d.defaultEnrollmentRuntime(), frame)
 		outcomes <- fmt.Sprintf("code=%q err=%v", code, err)
 	}
 
@@ -107,7 +107,7 @@ func TestDeliverSequentialAttemptsStillPrompt(t *testing.T) {
 
 	first := WireFrame{ID: "dlv_seq00000001", Agent: "alice", Envelope: "<transit/>"}
 	for attempt := 1; attempt <= 2; attempt++ {
-		if code, _, err := d.deliver(context.Background(), first); code != "" || err != nil {
+		if code, _, err := d.deliver(context.Background(), d.defaultEnrollmentRuntime(), first); code != "" || err != nil {
 			t.Fatalf("deliver #%d = %q, %v", attempt, code, err)
 		}
 	}
@@ -121,7 +121,7 @@ func TestDeliverSequentialAttemptsStillPrompt(t *testing.T) {
 
 func waitForFollowers(t *testing.T, d *Daemon, frame WireFrame, want int) {
 	t.Helper()
-	key := frame.ID + "\x00" + frame.Agent
+	key := d.defaultEnrollmentRuntime().id + "\x00" + frame.ID + "\x00" + frame.Agent
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		d.mu.Lock()

@@ -123,27 +123,33 @@ func intValue(request map[string]any, key string) int {
 // native adapter has no pane, and with herdr.service stopped there is no pane
 // id to send at all, so the caller's process ancestry is walked instead: the
 // Transit MCP server is a child of the harness process that registered.
-func (d *Daemon) callerAgent(request map[string]any) (string, bool) {
-	if agent, found := d.localAgentByPane(stringValue(request, "pane_id")); found && agent.Name != "" {
-		return agent.Name, true
+// It also resolves which organization the caller belongs to, because that is
+// what its address and its outbox partition are chosen by.
+func (d *Daemon) callerAgent(request map[string]any) (name, enrollment string, found bool) {
+	if agent, ok := d.localAgentByPane(stringValue(request, "pane_id")); ok && agent.Name != "" {
+		herdr := defaultEnrollment
+		if runtime := d.defaultEnrollmentRuntime(); runtime != nil {
+			herdr = runtime.id
+		}
+		return agent.Name, herdr, true
 	}
 	if pid := intValue(request, "pid"); pid > 0 {
-		if name, _, found := d.adapterByProcess(pid); found {
-			return name, true
+		if adapter := d.nativeAdapterForProcess(pid); adapter != nil {
+			return adapter.name, adapter.enrollment, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // localTargetExists reports whether a same-host address resolves, counting a
 // natively registered session as well as a Herdr pane. Without this a native
 // agent is unreachable over the local fast path even though deliver() knows
 // how to reach it.
-func (d *Daemon) localTargetExists(name string) bool {
+func (d *Daemon) localTargetExists(enrollment, name string) bool {
 	if _, found := d.localAgentByName(name); found {
 		return true
 	}
-	return d.nativeAdapterByName(name) != nil
+	return d.nativeAdapterByName(enrollment, name) != nil
 }
 
 func (d *Daemon) handleIPC(ctx context.Context, request map[string]any) map[string]any {
@@ -178,14 +184,41 @@ func (d *Daemon) handleIPC(ctx context.Context, request map[string]any) map[stri
 }
 
 func (d *Daemon) statusResponse() map[string]any {
-	outbox, dead, err := d.store.Counts()
-	if err != nil {
-		return failure("store_error", err.Error())
-	}
 	mode, modeErr := deliveryMode(d.cfg)
 	if modeErr != nil {
 		mode = "invalid"
 	}
+	// Counts and connection state are summed across enrollments so a
+	// single-organization box reads exactly as it always has, with the
+	// per-organization breakdown alongside it.
+	outbox, dead := 0, 0
+	connected := len(d.enrollments) > 0
+	lastError := ""
+	rows := make([]map[string]any, 0, len(d.enrollments))
+	for _, enrollment := range d.enrollments {
+		enrollmentConnected, enrollmentError := enrollment.snapshot()
+		if !enrollmentConnected {
+			connected = false
+		}
+		if enrollmentError != "" && lastError == "" {
+			lastError = enrollmentError
+		}
+		row := map[string]any{
+			"id": enrollment.id, "host": enrollment.host,
+			"connected": enrollmentConnected, "last_error": enrollmentError,
+		}
+		if enrollment.store != nil {
+			enrollmentOutbox, enrollmentDead, err := enrollment.store.Counts()
+			if err != nil {
+				return failure("store_error", err.Error())
+			}
+			outbox += enrollmentOutbox
+			dead += enrollmentDead
+			row["outbox"], row["dead"] = enrollmentOutbox, enrollmentDead
+		}
+		rows = append(rows, row)
+	}
+
 	d.mu.RLock()
 	// `agents` counts the HERDR roster, which is not the set that receives
 	// through a native adapter. Reporting only that number made a split
@@ -194,21 +227,28 @@ func (d *Daemon) statusResponse() map[string]any {
 	// success and deliveries silently took the Herdr path, which types into
 	// the pane. `adapters` is the set that actually answers, so the two can be
 	// compared directly instead of inferred from delivery forensics.
-	adapters := make([]map[string]any, 0, len(d.nativeByName))
-	for name, adapter := range d.nativeByName {
-		adapters = append(adapters, map[string]any{
-			"name": name, "harness": adapter.harness, "session_id": adapter.sessionID,
-			"pid": adapter.pid, "status": adapter.status, "named_by": adapter.namedBy,
-			"generation": adapter.generation, "anchor": adapter.anchor,
-		})
+	adapters := make([]map[string]any, 0, len(d.adapters))
+	agents := 0
+	for _, published := range d.roster {
+		agents += len(published)
+	}
+	for enrollment, byName := range d.nativeByName {
+		for name, adapter := range byName {
+			adapters = append(adapters, map[string]any{
+				"name": name, "harness": adapter.harness, "session_id": adapter.sessionID,
+				"pid": adapter.pid, "status": adapter.status, "named_by": adapter.namedBy,
+				"generation": adapter.generation, "anchor": adapter.anchor,
+				"enrollment": enrollment,
+			})
+		}
 	}
 	response := map[string]any{
-		"host": d.cfg.Host, "connected": d.connected, "paused": d.paused,
+		"host": d.cfg.Host, "connected": connected, "paused": d.paused,
 		"herdr":      d.herdrAvailable,
-		"last_error": d.lastError, "agents": len(d.roster),
+		"last_error": lastError, "agents": agents,
 		"uptime_seconds": int64(time.Since(d.started).Seconds()),
 		"outbox":         outbox, "dead": dead,
-		"delivery_mode": mode, "adapters": adapters,
+		"delivery_mode": mode, "adapters": adapters, "enrollments": rows,
 	}
 	d.mu.RUnlock()
 	sort.Slice(adapters, func(i, j int) bool {
@@ -234,21 +274,34 @@ func (d *Daemon) pauseResponse(request map[string]any) map[string]any {
 }
 
 func (d *Daemon) inboxResponse() map[string]any {
-	outbox, err := d.store.ListOutbox()
-	if err != nil {
-		return failure("store_error", err.Error())
-	}
-	dead, err := d.store.ListDead()
-	if err != nil {
-		return failure("store_error", err.Error())
+	outbox := []OutboxMessage{}
+	dead := []DeadMessage{}
+	for _, enrollment := range d.enrollments {
+		if enrollment.store == nil {
+			continue
+		}
+		enrollmentOutbox, err := enrollment.store.ListOutbox()
+		if err != nil {
+			return failure("store_error", err.Error())
+		}
+		enrollmentDead, err := enrollment.store.ListDead()
+		if err != nil {
+			return failure("store_error", err.Error())
+		}
+		outbox = append(outbox, enrollmentOutbox...)
+		dead = append(dead, enrollmentDead...)
 	}
 	return success(map[string]any{"outbox": outbox, "dead": dead, "draft_holds": d.draftHolds()})
 }
 
 func (d *Daemon) sendResponse(ctx context.Context, request map[string]any) map[string]any {
-	senderName, found := d.callerAgent(request)
+	senderName, senderEnrollment, found := d.callerAgent(request)
 	if !found {
 		return failure("agent_not_found", "caller is not a named Transit agent")
+	}
+	enrollment := d.enrollment(senderEnrollment)
+	if enrollment == nil || enrollment.store == nil {
+		return failure("enrollment_unavailable", "the caller's enrollment has no usable spool")
 	}
 	to := stringValue(request, "to")
 	body := stringValue(request, "body")
@@ -263,34 +316,34 @@ func (d *Daemon) sendResponse(ctx context.Context, request map[string]any) map[s
 		return failure("bad_address", err.Error())
 	}
 	message := &OutboxMessage{
-		ID: txID(), From: senderName + "@" + d.cfg.Host, To: to, Body: body,
+		ID: txID(), From: senderName + "@" + enrollment.host, To: to, Body: body,
 		ReplyTo: stringValue(request, "reply_to"), TS: time.Now().UTC(),
 	}
 
-	if !strings.Contains(to, "/") && targetHost == d.cfg.Host {
-		if !d.localTargetExists(targetName) {
+	if !strings.Contains(to, "/") && targetHost == enrollment.host {
+		if !d.localTargetExists(enrollment.id, targetName) {
 			return failure("agent_not_found", "target agent is not on this host")
 		}
-		if err := d.store.Enqueue(message); err != nil {
+		if err := enrollment.store.Enqueue(message); err != nil {
 			return failure("store_error", err.Error())
 		}
-		if err := d.deliverLocal(ctx, message, targetName); err != nil {
-			d.notifyOutbox()
+		if err := d.deliverLocal(ctx, enrollment, message, targetName); err != nil {
+			enrollment.notifyOutbox()
 			return success(map[string]any{
 				"id": message.ID, "state": "spooled", "local": false,
 				"warning": "local fast path held: " + err.Error(),
 			})
 		}
-		d.notifyOutbox()
+		enrollment.notifyOutbox()
 		return success(map[string]any{"id": message.ID, "state": "injected", "local": true})
 	}
 
 	waiter := d.registerCommit(message.ID)
 	defer d.removeCommit(message.ID, waiter)
-	if err := d.store.Enqueue(message); err != nil {
+	if err := enrollment.store.Enqueue(message); err != nil {
 		return failure("store_error", err.Error())
 	}
-	d.notifyOutbox()
+	enrollment.notifyOutbox()
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 	select {
@@ -309,22 +362,33 @@ func (d *Daemon) sendResponse(ctx context.Context, request map[string]any) map[s
 	}
 }
 
+// rpcResponse forwards to the Worker over the caller's own connection: an RPC
+// answered by the wrong organization would be answered correctly and be about
+// the wrong fleet.
 func (d *Daemon) rpcResponse(ctx context.Context, request map[string]any) map[string]any {
 	method := stringValue(request, "method")
 	params, _ := request["params"].(map[string]any)
 	if params == nil {
 		params = make(map[string]any)
 	}
+	_, callerEnrollment, hasCaller := d.callerAgent(request)
 	if paneID := stringValue(request, "pane_id"); paneID != "" {
 		agent, found := d.localAgentByPane(paneID)
 		if !found || agent.Name == "" {
 			return failure("agent_not_found", "calling pane is not a named herdr agent")
 		}
-		params["caller"] = agent.Name + "@" + d.cfg.Host
+		params["caller"] = agent.Name + "@" + d.enrollmentHost(callerEnrollment)
+	}
+	enrollment := d.enrollment(callerEnrollment)
+	if !hasCaller {
+		enrollment = d.defaultEnrollmentRuntime()
+	}
+	if enrollment == nil {
+		return failure("rpc_failed", "Transit is offline")
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	response, err := d.rpc(callCtx, method, params)
+	response, err := d.rpc(callCtx, enrollment, method, params)
 	if err != nil {
 		return failure("rpc_failed", err.Error())
 	}
@@ -341,7 +405,7 @@ func (d *Daemon) rpcResponse(ctx context.Context, request map[string]any) map[st
 }
 
 func (d *Daemon) roomResponse(ctx context.Context, request map[string]any) map[string]any {
-	name, found := d.callerAgent(request)
+	name, callerEnrollment, found := d.callerAgent(request)
 	if !found {
 		return failure("agent_not_found", "caller is not a named Transit agent")
 	}
@@ -351,7 +415,7 @@ func (d *Daemon) roomResponse(ctx context.Context, request map[string]any) map[s
 	}
 	params := map[string]any{
 		"room":    stringValue(request, "room"),
-		"address": name + "@" + d.cfg.Host,
+		"address": name + "@" + d.enrollmentHost(callerEnrollment),
 	}
 	if action == "create" {
 		policy := stringValue(request, "policy")
@@ -366,20 +430,20 @@ func (d *Daemon) roomResponse(ctx context.Context, request map[string]any) map[s
 	return d.rpcResponse(ctx, map[string]any{
 		"method": action + "_room",
 		"params": params,
+		"pid":    request["pid"], "pane_id": request["pane_id"],
 	})
 }
 
 func (d *Daemon) whoamiResponse(request map[string]any) map[string]any {
-	name, found := d.callerAgent(request)
+	name, callerEnrollment, found := d.callerAgent(request)
 	if !found {
 		return failure("agent_not_found", "caller is not a named Transit agent")
 	}
-	d.mu.RLock()
-	connected := d.connected
-	d.mu.RUnlock()
+	enrollment := d.enrollment(callerEnrollment)
+	connected, _ := enrollment.snapshot()
 	return success(map[string]any{
-		"address": name + "@" + d.cfg.Host,
-		"host":    d.cfg.Host, "connected": connected,
+		"address": name + "@" + enrollment.host,
+		"host":    enrollment.host, "connected": connected,
 	})
 }
 

@@ -69,7 +69,7 @@ func runDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := readToken()
+	token, err := readEnrollmentToken(Enrollment{ID: defaultEnrollment})
 	if err != nil {
 		return err
 	}
@@ -131,13 +131,18 @@ func runDaemon(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var wait sync.WaitGroup
-	wait.Add(6)
+	wait.Add(4)
 	go func() { defer wait.Done(); _ = serveIPC(ctx, listener, daemon) }()
 	go func() { defer wait.Done(); _ = serveAgentSocket(ctx, agentListener, daemon) }()
-	go func() { defer wait.Done(); daemon.wireLoop(ctx) }()
 	go func() { defer wait.Done(); daemon.rosterLoop(ctx) }()
-	go func() { defer wait.Done(); daemon.outboxLoop(ctx) }()
 	go func() { defer wait.Done(); daemon.holdLoop(ctx) }()
+	// One socket and one flush loop per organization. They share the identity
+	// store and the Herdr driver; they share nothing that carries a message.
+	for _, enrollment := range daemon.enrollments {
+		wait.Add(2)
+		go func() { defer wait.Done(); daemon.wireLoop(ctx, enrollment) }()
+		go func() { defer wait.Done(); daemon.outboxLoop(ctx, enrollment) }()
+	}
 	<-ctx.Done()
 	listener.Close()
 	agentListener.Close()

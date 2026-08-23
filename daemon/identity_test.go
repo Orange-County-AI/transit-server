@@ -33,7 +33,7 @@ func TestRegistrationKeepsItsNameAcrossANewSessionID(t *testing.T) {
 	if resumed.token != first.token {
 		t.Fatal("the token rotated, so the next resume would lose the identity again")
 	}
-	if d.nativeAdapterByName(first.name) != resumed {
+	if d.nativeAdapterByName(defaultEnrollment, first.name) != resumed {
 		t.Fatal("the name still routes to the old adapter")
 	}
 }
@@ -90,7 +90,7 @@ func TestDeclaredNameTakesOverAndDisconnectsTheAdapterItDisplaces(t *testing.T) 
 	if _, err := first.reader.ReadBytes('\n'); err == nil {
 		t.Fatal("the displaced adapter is still connected, so it would look alive and receive nothing")
 	}
-	adapter := d.nativeAdapterByName("clem")
+	adapter := d.nativeAdapterByName(defaultEnrollment, "clem")
 	if adapter == nil || adapter.sessionID != "session-2" {
 		t.Fatalf("clem routes to %#v; want the session that took the name", adapter)
 	}

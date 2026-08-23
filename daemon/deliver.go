@@ -19,8 +19,8 @@ const holdPollInterval = 2 * time.Second
 // terminal a second time while the first attempt was still waiting. A follower
 // now adopts the leader's outcome instead of prompting again; sequential
 // redeliveries — the unsettled channel banner — are untouched.
-func (d *Daemon) deliver(ctx context.Context, frame WireFrame) (code string, retryable bool, err error) {
-	key := frame.ID + "\x00" + frame.Agent
+func (d *Daemon) deliver(ctx context.Context, e *enrollmentRuntime, frame WireFrame) (code string, retryable bool, err error) {
+	key := e.id + "\x00" + frame.ID + "\x00" + frame.Agent
 	d.mu.Lock()
 	if flight, ok := d.inflight[key]; ok {
 		flight.waiters++
@@ -36,7 +36,7 @@ func (d *Daemon) deliver(ctx context.Context, frame WireFrame) (code string, ret
 	d.inflight[key] = flight
 	d.mu.Unlock()
 
-	code, retryable, err = d.deliverOnce(ctx, frame)
+	code, retryable, err = d.deliverOnce(ctx, e, frame)
 
 	flight.code, flight.retryable, flight.err = code, retryable, err
 	close(flight.done)
@@ -56,7 +56,7 @@ type deliveryFlight struct {
 	waiters   int
 }
 
-func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string, retryable bool, err error) {
+func (d *Daemon) deliverOnce(ctx context.Context, e *enrollmentRuntime, frame WireFrame) (code string, retryable bool, err error) {
 	if strings.HasPrefix(frame.ID, "tx_") && d.store.IncomingRecorded(frame.ID) {
 		return "", false, nil
 	}
@@ -70,7 +70,7 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 	if modeErr != nil {
 		return "invalid_delivery_mode", true, modeErr
 	}
-	if adapter := d.nativeAdapterByName(frame.Agent); adapter != nil && mode != "shadow" {
+	if adapter := d.nativeAdapterByName(e.id, frame.Agent); adapter != nil && mode != "shadow" {
 		// A native injection is not gentler than typing into the pane, it is
 		// only quieter: measured twice on 2026-08-23, `pi.sendUserMessage`
 		// landing while a person had unsent input DISCARDED that input - not
@@ -116,7 +116,7 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 	// `require` means an agent that has an adapter must use it. The question is
 	// whether this identity has ever presented one — a fact the daemon
 	// recorded — not what harness the pane claims to be running.
-	if mode == "require" && d.adapterCapable(frame.Agent) {
+	if mode == "require" && d.adapterCapable(e.id, frame.Agent) {
 		return "adapter_unavailable", true, fmt.Errorf("native adapter unavailable for %s", agent.Name)
 	}
 	if agent.LaunchPending {
@@ -272,7 +272,7 @@ func (d *Daemon) holdLoop(ctx context.Context) {
 		if !d.releaseClearedHolds(ctx) {
 			continue
 		}
-		if err := d.sendRoster(ctx); err != nil {
+		if err := d.sendRosters(ctx); err != nil {
 			d.logf("nudge after a released hold: %v", err)
 		}
 	}
@@ -322,12 +322,12 @@ func deliveryFailureCode(result PromptResult) string {
 	return "agent_prompt_failed"
 }
 
-func (d *Daemon) deliverLocal(ctx context.Context, message *OutboxMessage, targetName string) error {
+func (d *Daemon) deliverLocal(ctx context.Context, e *enrollmentRuntime, message *OutboxMessage, targetName string) error {
 	envelope := RenderEnvelope(EnvelopeInput{
-		From: message.From, ID: message.ID, TS: message.TS.UTC().Format(time.RFC3339Nano),
-		Kind: "dm", Body: message.Body, ReplyTo: message.ReplyTo,
+		From: message.From, ID: message.ID, TS: message.TS.Format(time.RFC3339Nano),
+		Kind: "dm", ReplyTo: message.ReplyTo, Body: message.Body,
 	})
-	code, _, err := d.deliver(ctx, WireFrame{
+	code, _, err := d.deliver(ctx, e, WireFrame{
 		T: "deliver", ID: message.ID, Agent: targetName, Envelope: envelope,
 	})
 	if err != nil {
@@ -336,9 +336,9 @@ func (d *Daemon) deliverLocal(ctx context.Context, message *OutboxMessage, targe
 	return nil
 }
 
-func (d *Daemon) bounce(ctx context.Context, original *OutboxMessage, reason string) {
+func (d *Daemon) bounce(ctx context.Context, e *enrollmentRuntime, original *OutboxMessage, reason string) {
 	name, host, err := parseAgentAddress(original.From)
-	if err != nil || host != d.cfg.Host {
+	if err != nil || host != e.host {
 		return
 	}
 	bounce := &OutboxMessage{
@@ -349,5 +349,5 @@ func (d *Daemon) bounce(ctx context.Context, original *OutboxMessage, reason str
 		From: bounce.From, ID: bounce.ID, TS: bounce.TS.Format(time.RFC3339Nano),
 		Kind: "dm", Body: bounce.Body,
 	})
-	_, _, _ = d.deliver(ctx, WireFrame{T: "deliver", ID: bounce.ID, Agent: name, Envelope: envelope})
+	_, _, _ = d.deliver(ctx, e, WireFrame{T: "deliver", ID: bounce.ID, Agent: name, Envelope: envelope})
 }

@@ -32,7 +32,7 @@ func waitForAdapterGone(t *testing.T, d *Daemon, name string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if d.nativeAdapterByName(name) == nil {
+		if d.nativeAdapterByName(defaultEnrollment, name) == nil {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -154,13 +154,16 @@ func attachNativeCaller(t *testing.T, d *Daemon, name string) *agentAdapter {
 		_ = client.Close()
 	})
 	adapter := &agentAdapter{
-		key: "omp:caller", harness: "omp", sessionID: "caller", pid: os.Getpid(), pidStart: start,
+		key: defaultEnrollment + "|session:caller", harness: "omp", sessionID: "caller",
+		pid: os.Getpid(), pidStart: start, enrollment: defaultEnrollment,
 		name: name, namedBy: "herdr", generation: 7, connection: server, waiters: make(map[string]chan agentDeliveryOutcome),
 	}
 	d.mu.Lock()
 	d.adapters[adapter.key] = adapter
-	d.nativeByName[name] = adapter
-	d.nativeNames[adapter.key] = nativeName{Name: name, NamedBy: "herdr", Generation: adapter.generation}
+	d.bindNativeNameLocked(defaultEnrollment, name, adapter)
+	d.nativeNames[adapter.key] = nativeName{
+		Name: name, NamedBy: "herdr", Generation: adapter.generation, Enrollment: defaultEnrollment,
+	}
 	d.mu.Unlock()
 	return adapter
 }
@@ -223,7 +226,7 @@ func TestAdapterRegistrationAdoptsHerdrPaneName(t *testing.T) {
 	if adapter.namedBy != "herdr" {
 		t.Fatalf("adapter named by = %q, want %q", adapter.namedBy, "herdr")
 	}
-	if record := d.nativeNames["session:session-1"]; record.NamedBy != "herdr" {
+	if record := d.nativeNames[defaultEnrollment+"|session:session-1"]; record.NamedBy != "herdr" {
 		t.Fatalf("stored named by = %q, want %q", record.NamedBy, "herdr")
 	}
 }
@@ -243,7 +246,7 @@ func TestAdapterRegistrationStoredNameWinsOverHerdrPane(t *testing.T) {
 	var prompts int
 	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
 	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
-	d.nativeNames["session:session-1"] = nativeName{Name: "stored", NamedBy: "auto"}
+	d.nativeNames[defaultEnrollment+"|session:session-1"] = nativeName{Name: "stored", NamedBy: "auto"}
 
 	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
 	if adapter.name != "stored" || adapter.namedBy != "auto" {
@@ -359,7 +362,7 @@ func TestNativeDeliveryAcknowledgementRecordsHistory(t *testing.T) {
 	client := connectAdapter(t, path, "claude", "delivery-session", "claude-delivery")
 	result := make(chan error, 1)
 	go func() {
-		code, retryable, err := d.deliver(context.Background(), WireFrame{ID: "tx_native_ack", Agent: client.name, Envelope: "<transit/>"})
+		code, retryable, err := d.deliver(context.Background(), d.defaultEnrollmentRuntime(), WireFrame{ID: "tx_native_ack", Agent: client.name, Envelope: "<transit/>"})
 		if code != "" || retryable {
 			result <- fmt.Errorf("deliver = %q, %t, %v", code, retryable, err)
 			return
@@ -389,7 +392,7 @@ func TestNativeDeliveryNakDoesNotRecordHistory(t *testing.T) {
 		err       error
 	}, 1)
 	go func() {
-		code, retryable, err := d.deliver(context.Background(), WireFrame{ID: "tx_native_nak", Agent: client.name, Envelope: "<transit/>"})
+		code, retryable, err := d.deliver(context.Background(), d.defaultEnrollmentRuntime(), WireFrame{ID: "tx_native_nak", Agent: client.name, Envelope: "<transit/>"})
 		result <- struct {
 			code      string
 			retryable bool
@@ -417,7 +420,7 @@ func TestDeliveryModeMatrix(t *testing.T) {
 	preferClient := connectAdapter(t, preferPath, "claude", "prefer-session", agent.Name)
 	preferResult := make(chan error, 1)
 	go func() {
-		code, retryable, err := prefer.deliver(context.Background(), WireFrame{ID: "tx_prefer", Agent: agent.Name, Envelope: "native"})
+		code, retryable, err := prefer.deliver(context.Background(), prefer.defaultEnrollmentRuntime(), WireFrame{ID: "tx_prefer", Agent: agent.Name, Envelope: "native"})
 		if code != "" || retryable {
 			preferResult <- fmt.Errorf("prefer delivery = %q, %t, %v", code, retryable, err)
 			return
@@ -439,7 +442,7 @@ func TestDeliveryModeMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = connectAdapter(t, shadowPath, "claude", "shadow-session", agent.Name)
-	code, retryable, err := shadow.deliver(context.Background(), WireFrame{ID: "tx_shadow", Agent: agent.Name, Envelope: "herdr"})
+	code, retryable, err := shadow.deliver(context.Background(), shadow.defaultEnrollmentRuntime(), WireFrame{ID: "tx_shadow", Agent: agent.Name, Envelope: "herdr"})
 	if code != "" || retryable || err != nil || shadowPrompts != 1 {
 		t.Fatalf("shadow delivery = %q, %t, %v; prompts=%d", code, retryable, err, shadowPrompts)
 	}
@@ -455,7 +458,7 @@ func TestDeliveryModeMatrix(t *testing.T) {
 	requireClient := connectAdapter(t, requirePath, "claude", "require-session", agent.Name)
 	requireClient.close()
 	waitForAdapterGone(t, required, agent.Name)
-	code, retryable, err = required.deliver(context.Background(), WireFrame{ID: "tx_require", Agent: agent.Name, Envelope: "blocked"})
+	code, retryable, err = required.deliver(context.Background(), required.defaultEnrollmentRuntime(), WireFrame{ID: "tx_require", Agent: agent.Name, Envelope: "blocked"})
 	if code != "adapter_unavailable" || !retryable || err == nil || requirePrompts != 0 {
 		t.Fatalf("require with a known adapter = %q, %t, %v; prompts=%d", code, retryable, err, requirePrompts)
 	}
@@ -463,7 +466,7 @@ func TestDeliveryModeMatrix(t *testing.T) {
 	// Refusing it would strand every pane-only agent on a `require` box.
 	other := HerdrAgent{Name: "other-mode", Kind: "claude", PaneID: "p2", Status: "idle"}
 	required.herdrAgents = []HerdrAgent{other}
-	code, retryable, err = required.deliver(context.Background(), WireFrame{ID: "tx_other", Agent: other.Name, Envelope: "fallback"})
+	code, retryable, err = required.deliver(context.Background(), required.defaultEnrollmentRuntime(), WireFrame{ID: "tx_other", Agent: other.Name, Envelope: "fallback"})
 	if code != "" || retryable || err != nil || requirePrompts != 1 {
 		t.Fatalf("require without an adapter = %q, %t, %v; prompts=%d", code, retryable, err, requirePrompts)
 	}

@@ -123,7 +123,7 @@ func TestDeliverAcksALandedPromptForAnAlreadyWorkingAgent(t *testing.T) {
 	// No state change at all: the agent was busy before and stayed busy.
 	rig.moveSeqOnPrompt = false
 
-	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+	if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 		t.Fatalf("deliver = %q, %v; want an ack proven by the transcript", code, err)
 	}
 	if !rig.daemon.store.IncomingRecorded(frame.ID) {
@@ -139,7 +139,7 @@ func TestDeliverNaksWhenTheTranscriptLacksTheDelivery(t *testing.T) {
 	rig.promptError = &HerdrAPIError{Code: "timeout", Message: "agent did not settle within 30000ms"}
 	frame := WireFrame{ID: "tx_guard000012", Agent: "alice", Envelope: "<transit id=\"tx_guard000012\"/>"}
 
-	code, retryable, err := rig.daemon.deliver(context.Background(), frame)
+	code, retryable, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
 	if code != "timeout" || !retryable || err == nil {
 		t.Fatalf("deliver = %q retryable=%t err=%v, want a retryable timeout", code, retryable, err)
 	}
@@ -156,7 +156,7 @@ func TestRedeliveryAlreadyInTheTranscriptIsNotRepasted(t *testing.T) {
 	frame := WireFrame{ID: "tx_guard000013", Agent: "alice", Envelope: "<transit id=\"tx_guard000013\"/>"}
 	rig.withTranscript(t, "{\"text\":\"<transit id=\\\"tx_guard000013\\\"/>\"}\n")
 
-	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+	if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 		t.Fatalf("redelivery = %q, %v; want a silent ack", code, err)
 	}
 	if prompts, keys, _ := rig.snapshot(); len(prompts) != 0 || len(keys) != 0 {
@@ -211,7 +211,7 @@ func TestDeliverHoldsWhileAPersonIsComposing(t *testing.T) {
 			rig := newGuardRig(t, test.kind, readScreenFixture(t, test.fixture))
 			frame := WireFrame{ID: "tx_guard000001", Agent: "alice", Envelope: "<transit/>"}
 
-			code, retryable, err := rig.daemon.deliver(context.Background(), frame)
+			code, retryable, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
 			if code != "draft_busy" || !retryable || err == nil {
 				t.Fatalf("deliver into a draft = %q retryable=%t err=%v, want a retryable draft_busy hold",
 					code, retryable, err)
@@ -237,12 +237,12 @@ func TestDeliverHoldsWhileAPersonIsComposing(t *testing.T) {
 func TestDeliverResumesAndReleasesTheHoldWhenTheComposerClears(t *testing.T) {
 	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-draft.txt"))
 	frame := WireFrame{ID: "tx_guard000002", Agent: "alice", Envelope: "<transit/>"}
-	if code, _, _ := rig.daemon.deliver(context.Background(), frame); code != "draft_busy" {
+	if code, _, _ := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "draft_busy" {
 		t.Fatalf("first attempt = %q, want draft_busy", code)
 	}
 
 	rig.setScreen(readScreenFixture(t, "omp-empty.txt"))
-	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+	if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 		t.Fatalf("second attempt = %q, %v; want delivery once the composer cleared", code, err)
 	}
 	prompts, _, notices := rig.snapshot()
@@ -266,7 +266,7 @@ func TestDeliverResumesAndReleasesTheHoldWhenTheComposerClears(t *testing.T) {
 func TestHeldPaneIsWatchedUntilTheComposerClears(t *testing.T) {
 	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-draft.txt"))
 	frame := WireFrame{ID: "tx_guard000008", Agent: "alice", Envelope: "<transit/>"}
-	if code, _, _ := rig.daemon.deliver(context.Background(), frame); code != "draft_busy" {
+	if code, _, _ := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "draft_busy" {
 		t.Fatalf("first attempt = %q, want draft_busy", code)
 	}
 
@@ -304,7 +304,7 @@ func TestStrandedPasteIsSubmittedNotRepasted(t *testing.T) {
 				ID: "tx_guard000003", Agent: "alice",
 				Envelope: readEnvelopeFixture(t, test.envelope),
 			}
-			if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+			if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 				t.Fatalf("deliver against its own unsent paste = %q, %v; want delivery", code, err)
 			}
 			prompts, keys, _ := rig.snapshot()
@@ -342,7 +342,7 @@ func TestStallRecoverySubmitsAndOwnsUpWhenAPersonHadTyped(t *testing.T) {
 				Envelope: readEnvelopeFixture(t, test.envelope),
 			}
 
-			if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+			if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 				t.Fatalf("stall recovery = %q, %v; want the paste submitted rather than abandoned", code, err)
 			}
 			_, keys, notices := rig.snapshot()
@@ -368,7 +368,7 @@ func TestDeliverAcksAPromptThatLandedDespiteACodedFailure(t *testing.T) {
 	rig.moveSeqOnPrompt = true
 	frame := WireFrame{ID: "tx_guard000009", Agent: "alice", Envelope: "<transit/>"}
 
-	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+	if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 		t.Fatalf("deliver after a coded timeout on a turn that started = %q, %v; want an ack", code, err)
 	}
 	if !rig.daemon.store.IncomingRecorded(frame.ID) {
@@ -382,7 +382,7 @@ func TestDeliverNaksACodedFailureWithNoEvidence(t *testing.T) {
 	rig.promptError = &HerdrAPIError{Code: "timeout", Message: "agent did not settle within 30000ms"}
 	frame := WireFrame{ID: "tx_guard000010", Agent: "alice", Envelope: "<transit/>"}
 
-	code, retryable, err := rig.daemon.deliver(context.Background(), frame)
+	code, retryable, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
 	if code != "timeout" || !retryable || err == nil {
 		t.Fatalf("deliver = %q retryable=%t err=%v, want a retryable timeout", code, retryable, err)
 	}
@@ -395,7 +395,7 @@ func TestDraftGuardOffDeliversIntoADraft(t *testing.T) {
 	t.Setenv("TRANSIT_DRAFT_GUARD", "0")
 	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-draft.txt"))
 	frame := WireFrame{ID: "tx_guard000006", Agent: "alice", Envelope: "<transit/>"}
-	if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+	if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 		t.Fatalf("deliver with the guard off = %q, %v; want delivery", code, err)
 	}
 	if prompts, _, _ := rig.snapshot(); len(prompts) != 1 {
@@ -420,7 +420,7 @@ func TestDeliverFailsOpenWithoutAReadableComposer(t *testing.T) {
 		t.Run(test.kind+"/"+test.fixture, func(t *testing.T) {
 			rig := newGuardRig(t, test.kind, readScreenFixture(t, test.fixture))
 			frame := WireFrame{ID: "tx_guard000007", Agent: "alice", Envelope: "<transit/>"}
-			if code, _, err := rig.daemon.deliver(context.Background(), frame); code != "" || err != nil {
+			if code, _, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame); code != "" || err != nil {
 				t.Fatalf("deliver with an unreadable composer = %q, %v; want delivery", code, err)
 			}
 			if prompts, _, _ := rig.snapshot(); len(prompts) != 1 {
@@ -441,12 +441,12 @@ func TestNativeDeliveryHoldsWhileAPersonIsComposing(t *testing.T) {
 		T: "register", Proto: agentProtocol, Harness: "omp",
 		SessionID: "01a02b49-b517-7000-a194-7a928f701e18", Name: "alice", Status: "idle",
 	})
-	if rig.daemon.nativeAdapterByName("alice") == nil {
+	if rig.daemon.nativeAdapterByName(defaultEnrollment, "alice") == nil {
 		t.Fatal("adapter did not register; the test would pass for the wrong reason")
 	}
 
 	frame := WireFrame{ID: "tx_guard000002", Agent: "alice", Envelope: "<transit/>"}
-	code, retryable, err := rig.daemon.deliver(context.Background(), frame)
+	code, retryable, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
 	if code != "draft_busy" || !retryable || err == nil {
 		t.Fatalf("native deliver into a draft = %q retryable=%t err=%v, want a retryable draft_busy hold",
 			code, retryable, err)
@@ -476,7 +476,7 @@ func TestNativeDeliveryProceedsWithoutAPane(t *testing.T) {
 	// that an absent adapter eventually times out.
 	_ = adapter.connection.Close()
 	frame := WireFrame{ID: "tx_guard000003", Agent: "headless", Envelope: "<transit/>"}
-	code, _, _ := rig.daemon.deliver(context.Background(), frame)
+	code, _, _ := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
 	if code == "draft_busy" {
 		t.Fatal("an adapter with no pane was held on another agent's draft")
 	}

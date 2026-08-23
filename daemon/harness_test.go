@@ -15,7 +15,7 @@ func TestRegistrationAcceptsAnUnknownHarness(t *testing.T) {
 	if adapter.harness != "acme-cli" {
 		t.Fatalf("harness = %q; want the value the client declared", adapter.harness)
 	}
-	if d.nativeAdapterByName("acme") != adapter {
+	if d.nativeAdapterByName(defaultEnrollment, "acme") != adapter {
 		t.Fatal("an unknown harness registered but is not routable by name")
 	}
 }
