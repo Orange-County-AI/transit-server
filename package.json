@@ -19,7 +19,7 @@
     "db:migrate:local": "wrangler d1 migrations apply transit-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply transit-db --remote"
   },
-  "//dependencies": "Every version is exact. `bun.lock` is committed, but a Worker whose auth schema is generated against one better-auth minor and installed against the next fails at runtime, not at build — a caret range on `better-auth` breaks a fresh clone the day upstream ships a schema field. Run `mise run oss:lock` after any change here.",
+  "//dependencies": "Every version is exact. `bun.lock` is committed, but a Worker whose auth schema is generated against one better-auth minor and installed against the next fails at runtime, not at build \u2014 a caret range on `better-auth` breaks a fresh clone the day upstream ships a schema field. Run `mise run oss:lock` after any change here.",
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.15.2",
     "@types/bun": "latest",
@@ -32,9 +32,9 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "better-auth": "1.6.5",
+    "better-auth": "1.6.22",
     "drizzle-orm": "0.45.2",
-    "hono": "4.12.14",
+    "hono": "4.12.34",
     "transit-connector-gmail": "github:Orange-County-AI/transit-connector-gmail#v0.2.0",
     "transit-connector-kaneo": "github:Orange-County-AI/transit-connector-kaneo#v0.1.0",
     "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.2.0",
