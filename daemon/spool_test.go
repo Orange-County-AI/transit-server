@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestSentRecordDoesNotDedupeADelivery(t *testing.T) {
 		t.Fatal("the sender's own record answered the delivery dedupe check")
 	}
 
-	if err := store.RecordIncoming(message.ID, "<transit/>"); err != nil {
+	if err := store.RecordIncoming(message.ID, "alice", deliveryViaAdapter, "<transit/>"); err != nil {
 		t.Fatal(err)
 	}
 	if !store.IncomingRecorded(message.ID) {
@@ -136,5 +137,64 @@ func TestSpoolDeduplicatesAndDeadLetters(t *testing.T) {
 	_, dead, _ := store.Counts()
 	if dead != 1 {
 		t.Fatalf("dead = %d, want 1", dead)
+	}
+}
+
+// Both delivery paths used to write an identical record, so after the fact
+// nothing could say whether a message reached its agent through the harness's
+// own adapter or by being typed into a pane. That question has to be
+// answerable from the record, not from a live snapshot taken at the right
+// moment.
+func TestIncomingHistoryRecordsTheTransport(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordIncoming("tx_via000001", "alice", deliveryViaAdapter, "<transit/>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordIncoming("tx_via000002", "bob", deliveryViaHerdr, "<transit/>"); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := store.ListIncoming(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]HistoryRecord{}
+	for _, record := range records {
+		byID[record.ID] = record
+	}
+	if got := byID["tx_via000001"]; got.Via != deliveryViaAdapter || got.Agent != "alice" {
+		t.Fatalf("adapter delivery recorded as %q/%q", got.Agent, got.Via)
+	}
+	if got := byID["tx_via000002"]; got.Via != deliveryViaHerdr || got.Agent != "bob" {
+		t.Fatalf("herdr delivery recorded as %q/%q", got.Agent, got.Via)
+	}
+	// The envelope is the bulk of each file and no lister wants it.
+	if byID["tx_via000001"].Envelope != "" {
+		t.Fatal("ListIncoming returned envelopes, which makes a status read expensive")
+	}
+}
+
+// A record written before the transport was recorded must still list, so an
+// upgrade does not blank the history it inherits.
+func TestListIncomingToleratesRecordsWithoutATransport(t *testing.T) {
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "history", "in", "tx_legacy0001.json")
+	if err := os.WriteFile(path, []byte(`{"id":"tx_legacy0001","envelope":"<transit/>","at":"2026-08-01T00:00:00Z"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := store.ListIncoming(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Via != "" {
+		t.Fatalf("records = %#v; want the legacy entry with an empty transport", records)
 	}
 }

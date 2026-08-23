@@ -1,0 +1,1 @@
+ALTER TABLE `message_delivery` ADD `via` text;

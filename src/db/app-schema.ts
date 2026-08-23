@@ -132,6 +132,13 @@ export const messageDelivery = sqliteTable(
       .default("queued"),
     attempts: integer("attempts").notNull().default(0),
     lastError: text("last_error"),
+    // How the delivery actually reached the agent: `adapter` for the harness's
+    // own native client, `herdr` for a pane injection, `transcript` for a
+    // redelivery settled from a session file. Deliberately not an enum: a
+    // daemon older than this column reports nothing, and a newer one may
+    // report a transport this Worker has not heard of. Neither is worth
+    // rejecting a delivery ack over.
+    via: text("via"),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
   (table) => [

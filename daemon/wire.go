@@ -40,15 +40,18 @@ type WireFrame struct {
 	// rejected the frame and closed 4002, and the host lost its connection the
 	// moment its last agent exited. The frame is shared by every type, so the
 	// pointer is what keeps `agents` off a deliver or ack frame.
-	Agents    *[]WireAgent    `json:"agents,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	From      string          `json:"from,omitempty"`
-	To        string          `json:"to,omitempty"`
-	Body      string          `json:"body,omitempty"`
-	ReplyTo   string          `json:"reply_to,omitempty"`
-	TS        string          `json:"ts,omitempty"`
-	Agent     string          `json:"agent,omitempty"`
-	Envelope  string          `json:"envelope,omitempty"`
+	Agents   *[]WireAgent `json:"agents,omitempty"`
+	ID       string       `json:"id,omitempty"`
+	From     string       `json:"from,omitempty"`
+	To       string       `json:"to,omitempty"`
+	Body     string       `json:"body,omitempty"`
+	ReplyTo  string       `json:"reply_to,omitempty"`
+	TS       string       `json:"ts,omitempty"`
+	Agent    string       `json:"agent,omitempty"`
+	Envelope string       `json:"envelope,omitempty"`
+	// Via reports which transport carried a delivery to its agent. Set only on
+	// `deliver_ack`; omitted everywhere else, and by any daemon older than it.
+	Via       string          `json:"via,omitempty"`
 	Code      string          `json:"code,omitempty"`
 	Retryable *bool           `json:"retryable,omitempty"`
 	RID       string          `json:"rid,omitempty"`

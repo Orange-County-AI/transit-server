@@ -297,6 +297,8 @@ func startDetachedDaemon() error {
 func runInbox(args []string) error {
 	flags := flag.NewFlagSet("inbox", flag.ContinueOnError)
 	watch := flags.Bool("watch", false, "refresh until interrupted")
+	delivered := flags.Bool("delivered", false, "list recent deliveries and the transport each took")
+	limit := flags.Int("limit", 20, "how many deliveries to list")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -321,11 +323,46 @@ func runInbox(args []string) error {
 					hold.PaneID, hold.Agent, hold.At.Format(time.RFC3339))
 			}
 		}
+		// The transport a delivery took is only answerable from the record.
+		// A live adapter list says who would receive natively right now, not
+		// how any particular message got there.
+		if *delivered {
+			rows := deliveredRows(response)
+			if *limit > 0 && len(rows) > *limit {
+				rows = rows[:*limit]
+			}
+			fmt.Print("\nDELIVERED\n")
+			for _, row := range rows {
+				via := row.Via
+				if via == "" {
+					via = "unrecorded"
+				}
+				fmt.Printf("  %s  %-16s via %-10s %s\n",
+					row.At.Format(time.RFC3339), row.Agent, via, row.ID)
+			}
+			if len(rows) == 0 {
+				fmt.Println("  (none)")
+			}
+		}
 		if !*watch {
 			return nil
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// deliveredRows decodes the delivery history an IPC response carries, matching
+// draftHoldRows: a malformed or absent list prints nothing rather than failing.
+func deliveredRows(response map[string]any) []HistoryRecord {
+	raw, err := json.Marshal(response["delivered"])
+	if err != nil {
+		return nil
+	}
+	var records []HistoryRecord
+	if err := json.Unmarshal(raw, &records); err != nil {
+		return nil
+	}
+	return records
 }
 
 func runPause(args []string) error {

@@ -26,7 +26,9 @@ export type DaemonFrame =
   // `agent` echoes the recipient of the `deliver` frame being settled so the
   // Worker can keep delivery bookkeeping per recipient. An older daemon omits
   // it; the Worker then falls back to the oldest queued entry for the id.
-  | { t: "deliver_ack"; id: string; agent?: string }
+  // `via` records which transport actually reached the agent. An older daemon
+  // omits that too, which reads as "unrecorded" rather than as a failure.
+  | { t: "deliver_ack"; id: string; agent?: string; via?: string }
   | { t: "deliver_nak"; id: string; code: string; retryable: boolean; agent?: string }
   | { t: "rpc"; rid: string; method: string; params: Record<string, unknown> }
   | { t: "pong" };
@@ -176,10 +178,12 @@ export function decodeDaemonFrame(raw: string): DaemonFrame | null {
     }
     case "deliver_ack": {
       const agent = optionalStringField(frame, "agent");
+      const via = optionalStringField(frame, "via");
       return {
         t: "deliver_ack",
         id: stringField(frame, "id"),
         ...(agent === undefined ? {} : { agent }),
+        ...(via === undefined ? {} : { via }),
       };
     }
     case "deliver_nak": {

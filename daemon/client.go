@@ -182,8 +182,12 @@ func (d *Daemon) readWire(ctx context.Context, e *enrollmentRuntime, connection 
 func (d *Daemon) handleIncoming(ctx context.Context, e *enrollmentRuntime, connection *wireConnection, frame WireFrame) {
 	code, retryable, err := d.deliver(ctx, e, frame)
 	if err == nil {
+		// The ack reports the transport this host recorded, so the fleet ledger
+		// can answer "how did this reach the agent" without an SSH session per
+		// box. An older Worker ignores the field.
 		if writeErr := connection.write(ctx, WireFrame{
 			T: "deliver_ack", ID: frame.ID, Agent: frame.Agent,
+			Via: d.store.IncomingVia(frame.ID),
 		}); writeErr != nil {
 			d.logf("deliver ack %s: %v", frame.ID, writeErr)
 		}

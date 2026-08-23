@@ -368,7 +368,7 @@ export class HostHub extends DurableObject<Env> {
         await this.handleSend(socket, attachment, frame);
         break;
       case "deliver_ack":
-        await this.handleDeliveryAck(frame.id, frame.agent);
+        await this.handleDeliveryAck(frame.id, frame.agent, frame.via);
         break;
       case "deliver_nak":
         await this.handleDeliveryNak(frame.id, frame.code, frame.retryable, frame.agent);
@@ -937,7 +937,7 @@ export class HostHub extends DurableObject<Env> {
     if (nextAlarm !== null) await budgetedAlarm(this.ctx.storage, nextAlarm);
   }
 
-  private async handleDeliveryAck(messageId: string, agent?: string): Promise<void> {
+  private async handleDeliveryAck(messageId: string, agent?: string, via?: string): Promise<void> {
     const resolved = await this.resolveQueuedMarker(messageId, agent);
     if (!resolved) return;
     const { key: markerKey, marker } = resolved;
@@ -957,15 +957,16 @@ export class HostHub extends DurableObject<Env> {
       "delivery_ack_write_failed",
       this.env.DB.prepare(
         `INSERT INTO message_delivery
-         (message_id, target_addr, status, attempts, last_error, updated_at)
-         VALUES (?, ?, 'injected', ?, NULL, ?)
+         (message_id, target_addr, status, attempts, last_error, via, updated_at)
+         VALUES (?, ?, 'injected', ?, NULL, ?, ?)
          ON CONFLICT(message_id, target_addr) DO UPDATE SET
            status = 'injected',
            attempts = excluded.attempts,
            last_error = NULL,
+           via = excluded.via,
            updated_at = excluded.updated_at`,
       )
-        .bind(messageId, item.targetAddr, item.attempts, Date.now())
+        .bind(messageId, item.targetAddr, item.attempts, via ?? null, Date.now())
         .run(),
     );
     }

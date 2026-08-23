@@ -1,0 +1,175 @@
+import { SELF, env } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+
+const ORIGIN = "http://localhost";
+
+type Credentials = { device_token: string; host: string; org: string };
+
+type FrameReader = {
+  next: () => Promise<Record<string, unknown>>;
+  send: (frame: Record<string, unknown>) => void;
+};
+
+function readFrames(socket: WebSocket): FrameReader {
+  const buffered: Record<string, unknown>[] = [];
+  const waiting: ((frame: Record<string, unknown>) => void)[] = [];
+  socket.addEventListener("message", (event) => {
+    const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+    const resolve = waiting.shift();
+    if (resolve) resolve(frame);
+    else buffered.push(frame);
+  });
+  return {
+    next: () => {
+      const { promise, resolve } = Promise.withResolvers<Record<string, unknown>>();
+      if (buffered.length > 0) resolve(buffered.shift()!);
+      else waiting.push(resolve);
+      return promise;
+    },
+    send: (frame) => socket.send(JSON.stringify(frame)),
+  };
+}
+
+async function operator(): Promise<{ cookie: string; org: string }> {
+  const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 8);
+  const signup = await SELF.fetch(`${ORIGIN}/api/auth/sign-up/email`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({
+      email: `via-${suffix}@test.example`,
+      password: "correct horse battery staple",
+      name: `via-${suffix}`,
+    }),
+  });
+  expect(signup.status).toBe(200);
+  const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+  const session = await SELF.fetch(`${ORIGIN}/api/auth/get-session`, { headers: { cookie } });
+  const body = await session.json<{ user: { id: string } }>();
+  return { cookie, org: body.user.id };
+}
+async function enroll(cookie: string, host: string): Promise<Credentials> {
+  const codeResponse = await SELF.fetch(`${ORIGIN}/api/hosts/enroll`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN, cookie },
+    body: JSON.stringify({ slug: host }),
+  });
+  expect(codeResponse.status).toBe(200);
+  const { code } = await codeResponse.json<{ code: string }>();
+  const claimed = await SELF.fetch(`${ORIGIN}/api/daemon/enroll`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, daemon_ver: "transport-test" }),
+  });
+  expect(claimed.status).toBe(200);
+  return await claimed.json<Credentials>();
+}
+
+async function connect(credentials: Credentials, agents: string[]): Promise<FrameReader> {
+  const response = await SELF.fetch(`${ORIGIN}/api/daemon/ws`, {
+    headers: { upgrade: "websocket", authorization: `Bearer ${credentials.device_token}` },
+  });
+  const frames = readFrames(response.webSocket!);
+  response.webSocket!.accept();
+  frames.send({ t: "hello", proto: 1, daemon_ver: "transport-test", host: credentials.host });
+  await frames.next();
+  frames.send({
+    t: "roster",
+    agents: agents.map((name, index) => ({
+      name,
+      kind: "omp",
+      pane_id: `${credentials.host}:p${index + 1}`,
+      status: "idle",
+      cwd: "/work",
+      title: name,
+      named_by: "user",
+    })),
+  });
+  // A round trip forces the roster through before the first message is sent.
+  frames.send({ t: "rpc", rid: "flush-hello", method: "list_rooms", params: {} });
+  await frames.next();
+  return frames;
+}
+
+// Sends over the daemon socket and returns the `deliver` frame for it. The
+// send_ack and the delivery arrive in either order on one socket, so this
+// reads until the delivery appears rather than assuming a position.
+async function sendAndAwaitDelivery(
+  frames: FrameReader,
+  id: string,
+  from: string,
+  to: string,
+): Promise<Record<string, unknown>> {
+  frames.send({
+    t: "send",
+    id,
+    from,
+    to,
+    body: `probe for ${to}`,
+    ts: new Date().toISOString(),
+  });
+  for (let read = 0; read < 8; read += 1) {
+    const frame = await frames.next();
+    if (frame.t === "deliver" && frame.id === id) return frame;
+  }
+  throw new Error(`no deliver frame for ${id}`);
+}
+
+function deliveryRow(id: string, target: string) {
+  return env.DB.prepare(
+    `SELECT status, via FROM message_delivery WHERE message_id = ? AND target_addr = ?`,
+  )
+    .bind(id, target)
+    .first<{ status: string; via: string | null }>();
+}
+
+describe("delivery transport reporting", () => {
+  // Both delivery paths acked identically, so the ledger could say a message
+  // was injected but never which transport carried it. Answering that per
+  // message is the only way to tell a fleet on native adapters from one
+  // quietly typing into panes.
+  it("records the transport a daemon reports on its ack", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["sender", "native-agent", "pane-agent"]);
+
+    const nativeId = "tx_via0000000a1";
+    await sendAndAwaitDelivery(frames, nativeId, "sender@titan", "native-agent@titan");
+    frames.send({ t: "deliver_ack", id: nativeId, agent: "native-agent", via: "adapter" });
+
+    const paneId = "tx_via0000000b2";
+    await sendAndAwaitDelivery(frames, paneId, "sender@titan", "pane-agent@titan");
+    frames.send({ t: "deliver_ack", id: paneId, agent: "pane-agent", via: "herdr" });
+
+    // The ledger write runs under waitUntil, so poll the row rather than
+    // guessing a duration: the awaited condition is the thing under test.
+    await expect
+      .poll(() => deliveryRow(nativeId, "native-agent@titan"))
+      .toEqual({ status: "injected", via: "adapter" });
+    await expect
+      .poll(() => deliveryRow(paneId, "pane-agent@titan"))
+      .toEqual({ status: "injected", via: "herdr" });
+
+    const response = await SELF.fetch(`${ORIGIN}/api/deliveries`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    const { deliveries } = await response.json<{ deliveries: Record<string, unknown>[] }>();
+    const byId = new Map(deliveries.map((row) => [row.id, row]));
+    expect(byId.get(nativeId)).toMatchObject({ via: "adapter" });
+    expect(byId.get(paneId)).toMatchObject({ via: "herdr" });
+  });
+
+  // A daemon older than the field omits it. The delivery must still settle —
+  // an unreported transport is missing information, not a bad frame.
+  it("settles an ack from a daemon that reports no transport", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["sender", "legacy-agent"]);
+
+    const id = "tx_via0000000c3";
+    await sendAndAwaitDelivery(frames, id, "sender@titan", "legacy-agent@titan");
+    frames.send({ t: "deliver_ack", id, agent: "legacy-agent" });
+
+    await expect
+      .poll(() => deliveryRow(id, "legacy-agent@titan"))
+      .toEqual({ status: "injected", via: null });
+  });
+});

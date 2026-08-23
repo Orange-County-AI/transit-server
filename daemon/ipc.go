@@ -291,7 +291,17 @@ func (d *Daemon) inboxResponse() map[string]any {
 		outbox = append(outbox, enrollmentOutbox...)
 		dead = append(dead, enrollmentDead...)
 	}
-	return success(map[string]any{"outbox": outbox, "dead": dead, "draft_holds": d.draftHolds()})
+	// Deliveries this host injected, with the transport each one took. The
+	// live adapter list says who WOULD receive natively; only this says who
+	// did.
+	delivered, err := d.store.ListIncoming(50)
+	if err != nil {
+		return failure("store_error", err.Error())
+	}
+	return success(map[string]any{
+		"outbox": outbox, "dead": dead, "delivered": delivered,
+		"draft_holds": d.draftHolds(),
+	})
 }
 
 func (d *Daemon) sendResponse(ctx context.Context, request map[string]any) map[string]any {

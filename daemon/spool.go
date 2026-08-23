@@ -37,10 +37,18 @@ type DeadMessage struct {
 }
 
 type HistoryRecord struct {
-	ID       string    `json:"id"`
-	Envelope string    `json:"envelope,omitempty"`
-	Message  string    `json:"message,omitempty"`
-	At       time.Time `json:"at"`
+	ID       string `json:"id"`
+	Envelope string `json:"envelope,omitempty"`
+	Message  string `json:"message,omitempty"`
+	// Agent and Via record who received a delivery and how it got there:
+	// `adapter` means the harness took it over `transit-agent/1`, `herdr`
+	// means it was typed into a pane. Both paths used to write an identical
+	// record, so after the fact nothing could say which transport ran — the
+	// question could only be answered by watching a live `status` at the
+	// moment of delivery, which is not an answer.
+	Agent string    `json:"agent,omitempty"`
+	Via   string    `json:"via,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 type Store struct{ root string }
@@ -308,14 +316,67 @@ func (s *Store) IncomingRecorded(id string) bool {
 	return json.Unmarshal(body, &record) == nil && record.Envelope != ""
 }
 
-func (s *Store) RecordIncoming(id, envelope string) error {
+// IncomingVia reports the transport recorded for a delivery, empty when this
+// host has no record of it. The ack reads the record rather than recomputing
+// the path so the two can never disagree, and a redelivery reports how the
+// message originally arrived instead of inventing a second answer.
+func (s *Store) IncomingVia(id string) string {
+	body, err := os.ReadFile(filepath.Join(s.root, "history", "in", id+".json"))
+	if err != nil {
+		return ""
+	}
+	var record HistoryRecord
+	if json.Unmarshal(body, &record) != nil {
+		return ""
+	}
+	return record.Via
+}
+
+func (s *Store) RecordIncoming(id, agent, via, envelope string) error {
 	return s.withLock(func() error {
 		return writeJSONAtomic(
 			filepath.Join(s.root, "history", "in", id+".json"),
-			HistoryRecord{ID: id, Envelope: envelope, At: time.Now().UTC()},
+			HistoryRecord{ID: id, Envelope: envelope, Agent: agent, Via: via, At: time.Now().UTC()},
 			0o600,
 		)
 	})
+}
+
+// ListIncoming returns the most recent deliveries this host injected, newest
+// first. It is the record that answers "how did this actually reach the
+// agent", which no live snapshot can answer after the fact.
+func (s *Store) ListIncoming(limit int) ([]HistoryRecord, error) {
+	dir := filepath.Join(s.root, "history", "in")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	records := make([]HistoryRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var record HistoryRecord
+		if json.Unmarshal(data, &record) != nil {
+			continue
+		}
+		// The envelope is the bulk of the file and no caller of this listing
+		// wants it; dropping it keeps a status read cheap.
+		record.Envelope = ""
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].At.After(records[j].At) })
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+	return records, nil
 }
 
 // SentRecorded reports whether the outbox archived this id after the Worker

@@ -1178,7 +1178,12 @@ app.get("/api/deliveries", async (context) => {
             NULL AS read_at, NULL AS settled_at,
             m.created_at, m.id AS conversation_id, NULL AS user,
             substr(m.body, 1, 240) AS preview, NULL AS posted_at,
-            MAX(d.last_error) AS post_error
+            MAX(d.last_error) AS post_error,
+            -- The transport that actually reached the agent. Aggregated with
+            -- MAX because a message fanned out to several recipients can have
+            -- taken a different path to each; the per-recipient truth is in
+            -- message_delivery.
+            MAX(d.via) AS via
      FROM message m LEFT JOIN message_delivery d ON d.message_id = m.id
      WHERE m.org_id = ? OR m.recipient_org_id = ?
      GROUP BY m.id

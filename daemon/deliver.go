@@ -12,6 +12,16 @@ import (
 // something is actually held, and only against the local Herdr socket.
 const holdPollInterval = 2 * time.Second
 
+// How a delivery actually reached its agent. `adapter` is the harness's own
+// native client over `transit-agent/1`; `herdr` typed it into a pane;
+// `transcript` is a redelivery the harness had already read, settled from its
+// session file without injecting anything.
+const (
+	deliveryViaAdapter    = "adapter"
+	deliveryViaHerdr      = "herdr"
+	deliveryViaTranscript = "transcript"
+)
+
 // deliver coalesces concurrent delivery attempts of the same message to the
 // same agent. The Worker retries a queued entry on a backoff that starts
 // below a legitimate in-flight attempt (an agent.prompt can wait out a full
@@ -95,7 +105,7 @@ func (d *Daemon) deliverOnce(ctx context.Context, e *enrollmentRuntime, frame Wi
 		if err != nil {
 			return code, retryable, err
 		}
-		if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
+		if err := d.store.RecordIncoming(frame.ID, frame.Agent, deliveryViaAdapter, frame.Envelope); err != nil {
 			return "history_write_failed", true, err
 		}
 		return "", false, nil
@@ -129,7 +139,7 @@ func (d *Daemon) deliverOnce(ctx context.Context, e *enrollmentRuntime, frame Wi
 	// back two and three times — so the harness transcript is asked too.
 	if transcript := agent.SessionTranscript(); transcript != "" {
 		if found, err := transcriptContains(transcript, frame.ID); err == nil && found {
-			if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
+			if err := d.store.RecordIncoming(frame.ID, frame.Agent, deliveryViaTranscript, frame.Envelope); err != nil {
 				return "history_write_failed", true, err
 			}
 			return "", false, nil
@@ -159,7 +169,7 @@ func (d *Daemon) deliverOnce(ctx context.Context, e *enrollmentRuntime, frame Wi
 	}
 	result := prompt(ctx, agent.Name, frame.Envelope, promptTimeout)
 	if result.OK {
-		if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
+		if err := d.store.RecordIncoming(frame.ID, frame.Agent, deliveryViaHerdr, frame.Envelope); err != nil {
 			return "history_write_failed", true, err
 		}
 		return "", false, nil
@@ -171,7 +181,7 @@ func (d *Daemon) deliverOnce(ctx context.Context, e *enrollmentRuntime, frame Wi
 	// session transcript is the artefact that settles it, exactly as the native
 	// adapters use it.
 	if d.deliveryLanded(ctx, agent, frame.ID, before) {
-		if err := d.store.RecordIncoming(frame.ID, frame.Envelope); err != nil {
+		if err := d.store.RecordIncoming(frame.ID, frame.Agent, deliveryViaHerdr, frame.Envelope); err != nil {
 			return "history_write_failed", true, err
 		}
 		return "", false, nil
