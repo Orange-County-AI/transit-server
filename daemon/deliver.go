@@ -113,7 +113,10 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 	if !found || agent.PaneID == "" {
 		return "agent_not_found", true, fmt.Errorf("agent %s not found", frame.Agent)
 	}
-	if mode == "require" && nativeHarness(agent.Kind) {
+	// `require` means an agent that has an adapter must use it. The question is
+	// whether this identity has ever presented one — a fact the daemon
+	// recorded — not what harness the pane claims to be running.
+	if mode == "require" && d.adapterCapable(frame.Agent) {
 		return "adapter_unavailable", true, fmt.Errorf("native adapter unavailable for %s", agent.Name)
 	}
 	if agent.LaunchPending {

@@ -10,12 +10,30 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// adapterCapable answers whether a name has ever presented a native adapter.
+// It is a fact the daemon recorded itself, unlike the harness kind the Herdr
+// roster carries, which the agent asserts about itself — `require` mode used
+// to refuse delivery based on that assertion. The record is persisted, so the
+// capability survives a daemon restart and an adapter that is merely
+// disconnected still holds its claim.
+func (d *Daemon) adapterCapable(name string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, record := range d.nativeNames {
+		if record.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	agentProtocol     = 1
@@ -461,18 +479,17 @@ func (adapter *agentAdapter) failWaiters() {
 	}
 }
 
-func nativeHarness(harness string) bool {
-	switch harness {
-	case "claude", "omp", "pi", "opencode":
-		return true
-	default:
-		return false
-	}
-}
+// A harness names the client that is speaking, and a client asserts it about
+// itself. It selects a composer parser and labels a `status` row; it is not an
+// authorization input. The closed allowlist that used to live here meant a new
+// harness could not register without a daemon release, and a model that
+// misreported its own harness changed its delivery policy. Only the shape is
+// checked now, so the value stays safe to print and to compare.
+var harnessPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, connection net.Conn) (*agentAdapter, string, string) {
-	if !nativeHarness(frame.Harness) {
-		return nil, "unsupported_harness", "harness must be claude, omp, pi, or opencode"
+	if !harnessPattern.MatchString(frame.Harness) {
+		return nil, "unsupported_harness", "harness must match [a-z][a-z0-9-]{0,31}"
 	}
 	if strings.TrimSpace(frame.SessionID) == "" {
 		return nil, "invalid_session", "session_id is required"

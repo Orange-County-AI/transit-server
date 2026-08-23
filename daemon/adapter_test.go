@@ -24,6 +24,22 @@ type adapterTestClient struct {
 	generation uint64
 }
 
+func (client *adapterTestClient) close() { _ = client.connection.Close() }
+
+// waitForAdapterGone blocks until the daemon has noticed a closed adapter
+// connection, which is asynchronous: the reader goroutine deregisters.
+func waitForAdapterGone(t *testing.T, d *Daemon, name string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.nativeAdapterByName(name) == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("adapter %s was still registered after its connection closed", name)
+}
+
 func newAdapterTestDaemon(t *testing.T, mode string, agents []HerdrAgent, prompts *int) (*Daemon, string) {
 	t.Helper()
 	var mu sync.Mutex
@@ -428,20 +444,28 @@ func TestDeliveryModeMatrix(t *testing.T) {
 		t.Fatalf("shadow delivery = %q, %t, %v; prompts=%d", code, retryable, err, shadowPrompts)
 	}
 
+	// `require` refuses the Herdr path for an agent that has an adapter, which
+	// is a fact the daemon recorded when that adapter registered — not the
+	// harness kind the pane reports about itself.
 	var requirePrompts int
-	required, _ := newAdapterTestDaemon(t, "require", []HerdrAgent{agent}, &requirePrompts)
+	required, requirePath := newAdapterTestDaemon(t, "require", []HerdrAgent{agent}, &requirePrompts)
 	if _, err := required.refreshRoster(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	requireClient := connectAdapter(t, requirePath, "claude", "require-session", agent.Name)
+	requireClient.close()
+	waitForAdapterGone(t, required, agent.Name)
 	code, retryable, err = required.deliver(context.Background(), WireFrame{ID: "tx_require", Agent: agent.Name, Envelope: "blocked"})
 	if code != "adapter_unavailable" || !retryable || err == nil || requirePrompts != 0 {
-		t.Fatalf("require claude = %q, %t, %v; prompts=%d", code, retryable, err, requirePrompts)
+		t.Fatalf("require with a known adapter = %q, %t, %v; prompts=%d", code, retryable, err, requirePrompts)
 	}
-	other := HerdrAgent{Name: "other-mode", Kind: "other", PaneID: "p2", Status: "idle"}
+	// An agent that never presented an adapter still falls back to typing.
+	// Refusing it would strand every pane-only agent on a `require` box.
+	other := HerdrAgent{Name: "other-mode", Kind: "claude", PaneID: "p2", Status: "idle"}
 	required.herdrAgents = []HerdrAgent{other}
 	code, retryable, err = required.deliver(context.Background(), WireFrame{ID: "tx_other", Agent: other.Name, Envelope: "fallback"})
 	if code != "" || retryable || err != nil || requirePrompts != 1 {
-		t.Fatalf("require other = %q, %t, %v; prompts=%d", code, retryable, err, requirePrompts)
+		t.Fatalf("require without an adapter = %q, %t, %v; prompts=%d", code, retryable, err, requirePrompts)
 	}
 }
 
