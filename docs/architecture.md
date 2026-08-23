@@ -91,6 +91,18 @@ member's `HostHub`. It accepts authenticated viewer sockets for live transcript 
 **Rationale:** a single ordered room authority preserves room sequence and makes
 membership fan-out explicit.
 
+**Decision — a member's organization and the room's organization are two
+different things.** A room owned by organization A may hold members from
+organization B while an accepted `organization_connection` links them, so each
+member record carries its own organization and fan-out resolves the destination
+as `org:<member_org_id>:host:<slug>` — the member's HostHub, never the room's.
+The delivery's own `org` field stays the room's, because the drain path resolves
+`org:<org>:room:<name>` to acknowledge it. **Rationale:** resolving a foreign
+member's hub under the room's organization names a Durable Object that exists
+and is empty, so the delivery would appear to succeed and arrive nowhere; making
+the two organizations distinct fields is what makes that mistake impossible to
+write by accident.
+
 ### Integration
 
 **Decision — each configured integration instance has one `Integration` DO.**
@@ -143,7 +155,8 @@ its watermark planted at "now": Transit is a live relay, not a backfill tool.
 HTTP 429 is surfaced as `backoffMs` from `Retry-After`, never as a failure.
 
 **Decision — D1 holds the queryable control plane and archive.** It stores
-hosts, hashed device tokens, agent roster snapshots, rooms, room members,
+hosts, hashed device tokens, agent roster snapshots, rooms, room members and
+the organization each member belongs to,
 integration configurations, and ingest sources, plus the message and delivery
 archive used by `read_message`. Messages are retained
 for 7 days; integration deliveries are retained for 30 days. Hot queues live in
@@ -336,9 +349,14 @@ start time so PID reuse cannot impersonate a dead session, and returns a random
 ## Addressing and names
 
 **Decision — direct agent addresses use `name@host`; room addresses use
-`#room`.** For example, `omp-h5vv@titan` is an agent address. **Rationale:**
-these forms distinguish a globally routable host destination from an
-organization-scoped shared room.
+`#room`.** For example, `omp-h5vv@titan` is an agent address. Either may be
+qualified with an organization slug — `partner-org/alice@titan`,
+`partner-org/#ops` — to name a resource in a connected organization; unqualified
+always means the caller's own organization. **Rationale:** these forms
+distinguish a globally routable host destination from a shared room, and the
+optional qualifier keeps the unqualified form meaning exactly what it always
+meant while letting one agent hold membership in same-named rooms in several
+organizations at once.
 
 Agent and room names match `^[a-z][a-z0-9-]{0,31}$`. Host slugs match
 `^[a-z0-9][a-z0-9-]{0,31}$`, so established names such as `52labs` are valid.

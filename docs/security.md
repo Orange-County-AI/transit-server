@@ -64,7 +64,18 @@ cross-organization delivery retains its connection id and rechecks it before
 every dispatch, so disconnecting either organization blocks new sends and kills
 queued retries before another injection. Existing accepted message history
 remains visible to both participants. Connections do not expose host tokens,
-integration credentials, rooms, room membership, or unconnected rosters.
+integration credentials, or unconnected rosters.
+
+A connection is also the sole authorization for cross-organization room
+membership: a room owned by one organization admits a member from another only
+while an accepted connection links them, and the `Room` DO reverifies that
+connection itself rather than trusting the caller that proposed the member.
+Revocation fails closed — a foreign member can no longer join or post, new
+fan-out skips it and is recorded dead, and a queued room delivery carries its
+connection id into the same recheck that already kills a revoked DM. Membership
+rows survive revocation deliberately, because nothing is delivered while the
+connection is gone and a partial prune across two organizations' rooms would
+destroy operator state without improving that guarantee.
 
 Agents may otherwise act only as themselves: the daemon pins sender and
 room-creator identity to the active local adapter and rejects model-supplied

@@ -128,7 +128,7 @@ func mcpTools() []map[string]any {
 		{
 			"name": "send_message", "description": "Send a durable message to an agent or room.",
 			"inputSchema": objectSchema(map[string]any{
-				"to":       stringProperty("Target name@host, organization/name@host, or #room."),
+				"to":       stringProperty("Target name@host, organization/name@host, #room, or organization/#room."),
 				"message":  stringProperty("Message body."),
 				"reply_to": stringProperty("Optional message id being answered."),
 			}, "to", "message"),
@@ -161,22 +161,24 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name": "list_rooms", "description": "List rooms in the Transit fleet.",
-			"inputSchema": objectSchema(map[string]any{}),
+			"inputSchema": objectSchema(map[string]any{
+				"organization": stringProperty("Optional connected organization slug."),
+			}),
 		},
 		{
 			"name": "create_room", "description": "Create a Transit room and join it.",
 			"inputSchema": objectSchema(map[string]any{
-				"name":   stringProperty("Room name."),
+				"name":   stringProperty("Plain room name; a room is always created in your own organization."),
 				"policy": policyProperty,
 			}, "name"),
 		},
 		{
 			"name": "join_room", "description": "Join an open Transit room.",
-			"inputSchema": objectSchema(map[string]any{"room": stringProperty("Room name.")}, "room"),
+			"inputSchema": objectSchema(map[string]any{"room": stringProperty("Room name, #room, or organization/#room for a connected organization's room.")}, "room"),
 		},
 		{
 			"name": "leave_room", "description": "Leave a Transit room.",
-			"inputSchema": objectSchema(map[string]any{"room": stringProperty("Room name.")}, "room"),
+			"inputSchema": objectSchema(map[string]any{"room": stringProperty("Room name, #room, or organization/#room for a connected organization's room.")}, "room"),
 		},
 		{
 			"name": "whoami", "description": "Show this pane's Transit identity.",
@@ -320,11 +322,15 @@ func dispatchMCPTool(name string, raw json.RawMessage) (string, error) {
 		formatted, _ := json.MarshalIndent(response["result"], "", "  ")
 		return string(formatted), nil
 	case "list_rooms":
-		if err := decodeMCPArguments(raw, &struct{}{}); err != nil {
+		var args struct {
+			Organization string `json:"organization"`
+		}
+		if err := decodeMCPArguments(raw, &args); err != nil {
 			return "", err
 		}
 		response, err := daemonCall(map[string]any{
-			"op": "rpc", "method": "list_rooms", "params": map[string]any{},
+			"op": "rpc", "method": "list_rooms",
+			"params": map[string]any{"organization": args.Organization},
 		})
 		if err != nil {
 			return "", err

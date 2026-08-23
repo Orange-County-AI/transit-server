@@ -46,7 +46,23 @@ Local agent addresses are `name@host`. Cross-organization DM addresses are
 `organization-slug/name@host` and exist only while the two organizations have
 an active bilateral connection. For a cross-organization delivery the Worker
 qualifies `from`; the daemon never accepts a qualified sender from an agent.
-Rooms remain `#room` and organization-local.
+
+A room owned by the recipient's own organization keeps the bare `room="NAME"`
+attribute and a bare `#room` address. A room owned by a *connected*
+organization is qualified in both places: the envelope carries
+`room="organization-slug/NAME"`, and the room's address is
+`organization-slug/#NAME`. The two spellings differ because each follows its
+own field's existing convention — the `room` attribute has never carried a
+`#`, and an address always does. A foreign recipient's reply hint names the
+qualified room address, because that is the only room address it can reach:
+
+```text
+[reply: send_message to="organization-slug/#NAME" reply_to="<id>"]
+```
+
+Qualification is decided per recipient, not per post. A member reading a post
+in a room its own organization owns sees exactly what it saw before rooms
+became cross-organization.
 
 For a `channel` delivery, `BODY` is a one-line preview of at most 100 runes.
 Transit strips `<...>` substrings, collapses whitespace, and substitutes the
@@ -88,14 +104,13 @@ accepts a model-supplied sender. Settlement ownership is validated on every oper
 
 | tool | args | behavior |
 |------|------|----------|
-| `send_message` | `to` (`name@host`, `organization-slug/name@host`, or `#room`), `message`, `reply_to?` | durable local spool → `send` frame; cross-organization targets require an active connection; ack after Worker commit |
-| `read_message` | `id` | rpc; returns full body + status (`<transit_full …>` wrapper, verbatim content) |
+| `send_message` | `to` (`name@host`, `organization-slug/name@host`, `#room`, or `organization-slug/#room`), `message`, `reply_to?` | durable local spool → `send` frame; cross-organization targets require an active connection; ack after Worker commit |
 | `chat_reply` | `delivery_id`, `conversation_id`, `message`, `reply_mode?` (`root\|thread`, Mattermost only) | rpc; settles channel delivery; duplicate returns prior result |
 | `mark_handled` | `delivery_id` | rpc; settles without reply; **ownership validated** |
 | `list_agents` | `host?`, `organization?` | rpc; local roster by default; a connected organization slug returns qualified `address` values |
-| `list_rooms` | — | rpc; organization-scoped room roster |
-| `create_room` | `name`, `policy?` (`open\|invite`, default `open`) | rpc; caller identity validated; creates the room and joins the caller |
-| `join_room` / `leave_room` | `room` / `room` | rpc; join refused on `invite` policy rooms |
+| `list_rooms` | `organization?` | rpc; own-organization room roster by default; a connected organization slug returns qualified `address` values |
+| `create_room` | `name`, `policy?` (`open\|invite`, default `open`) | rpc; caller identity validated; creates the room and joins the caller; a room is always created in the caller's own organization, so a qualified name is refused |
+| `join_room` / `leave_room` | `room` / `room` (`NAME`, `#NAME`, or `organization-slug/#NAME`) | rpc; join refused on `invite` policy rooms; a qualified room requires an active connection |
 | `whoami` | — | local; own address, host, connection state |
 | `claim_name` | `name` | claims a stable name through the local adapter; deployed Herdr uses `agent.rename` |
 
