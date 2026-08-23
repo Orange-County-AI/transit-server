@@ -86,20 +86,30 @@ func runDaemon(args []string) error {
 		return err
 	}
 
-	herdrPath, err := herdrSocketPath(cfg)
-	if err != nil {
-		return err
+	// Herdr is a delivery transport, not a prerequisite. A box whose harnesses
+	// all register native adapters — Claude Code's monitor, the OMP extension —
+	// has no use for it, and refusing to start there left those boxes with no
+	// Transit at all. An unreachable Herdr degrades delivery for the agents
+	// that need typing; it does not stop the daemon.
+	herdrPath, pathErr := herdrSocketPath(cfg)
+	if pathErr != nil {
+		herdrPath = ""
 	}
 	driver := newHerdrSocket(herdrPath, func(message string) { log.Print("transit: ", message) })
-	herdrVersion, protocol, err := driver.Ping(context.Background())
-	if err != nil {
-		return err
-	}
 	daemon := newDaemon(cfg, token, store, driver)
-	if _, err := daemon.refreshRoster(context.Background()); err != nil {
-		return err
+	herdrVersion, protocol, pingErr := driver.Ping(context.Background())
+	if pingErr != nil {
+		cause := pingErr
+		if pathErr != nil {
+			cause = pathErr
+		}
+		daemon.setHerdrAvailable(false, cause)
+	} else {
+		log.Printf("transit: herdr %s protocol %d, host %s", herdrVersion, protocol, cfg.Host)
 	}
-	log.Printf("transit: herdr %s protocol %d, host %s", herdrVersion, protocol, cfg.Host)
+	if _, err := daemon.refreshRoster(context.Background()); err != nil {
+		log.Printf("transit: initial roster refresh: %v", err)
+	}
 
 	listener, err := listenIPC(socketPath())
 	if err != nil {
@@ -197,6 +207,11 @@ func runStatus(args []string) error {
 	fmt.Printf("host: %v\nconnected: %v\npaused: %v\nmode: %v\nagents: %v\noutbox: %v\ndead: %v\nlast error: %v\n",
 		response["host"], response["connected"], response["paused"], response["delivery_mode"],
 		response["agents"], response["outbox"], response["dead"], response["last_error"])
+	// Only the unhappy case prints: an available Herdr is the unremarkable
+	// default and does not deserve a line in every status read.
+	if available, ok := response["herdr"].(bool); ok && !available {
+		fmt.Println("herdr: unavailable")
+	}
 	// The adapter rows answer "who actually receives natively", which the agent
 	// count cannot: an agent present in the Herdr roster and absent here is one
 	// whose delivery falls back to typing into its pane.

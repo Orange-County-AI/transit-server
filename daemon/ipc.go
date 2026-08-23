@@ -204,6 +204,7 @@ func (d *Daemon) statusResponse() map[string]any {
 	}
 	response := map[string]any{
 		"host": d.cfg.Host, "connected": d.connected, "paused": d.paused,
+		"herdr":      d.herdrAvailable,
 		"last_error": d.lastError, "agents": len(d.roster),
 		"uptime_seconds": int64(time.Since(d.started).Seconds()),
 		"outbox":         outbox, "dead": dead,

@@ -35,30 +35,36 @@ type Daemon struct {
 
 	started time.Time
 
-	mu            sync.RWMutex
-	roster        []WireAgent
-	herdrAgents   []HerdrAgent
-	rosterHash    string
-	connection    *wireConnection
-	connected     bool
-	lastError     string
-	paused        bool
-	holds         map[string]draftHold
-	inflight      map[string]*deliveryFlight
-	commitWaiters map[string][]chan sendOutcome
-	rpcWaiters    map[string]chan RPCResponse
-	adapters      map[string]*agentAdapter
-	nativeByName  map[string]*agentAdapter
-	nativeNames   map[string]nativeName
-	nextRPC       uint64
-	kickRoster    chan struct{}
-	kickOutbox    chan struct{}
+	mu          sync.RWMutex
+	roster      []WireAgent
+	herdrAgents []HerdrAgent
+	rosterHash  string
+	connection  *wireConnection
+	connected   bool
+	// herdrAvailable records whether the Herdr socket answered on the most
+	// recent attempt. Herdr is optional: a box whose harnesses all register
+	// native adapters never needs it, so an outage degrades the daemon to
+	// adapter-only instead of stopping it from starting.
+	herdrAvailable bool
+	lastError      string
+	paused         bool
+	holds          map[string]draftHold
+	inflight       map[string]*deliveryFlight
+	commitWaiters  map[string][]chan sendOutcome
+	rpcWaiters     map[string]chan RPCResponse
+	adapters       map[string]*agentAdapter
+	nativeByName   map[string]*agentAdapter
+	nativeNames    map[string]nativeName
+	nextRPC        uint64
+	kickRoster     chan struct{}
+	kickOutbox     chan struct{}
 }
 
 func newDaemon(cfg *Config, token string, store *Store, herdr HerdrDriver) *Daemon {
 	d := &Daemon{
 		cfg: cfg, token: token, store: store, herdr: herdr, started: time.Now(),
-		holds: make(map[string]draftHold), inflight: make(map[string]*deliveryFlight),
+		herdrAvailable: true,
+		holds:          make(map[string]draftHold), inflight: make(map[string]*deliveryFlight),
 		commitWaiters: make(map[string][]chan sendOutcome),
 		rpcWaiters:    make(map[string]chan RPCResponse), adapters: make(map[string]*agentAdapter),
 		nativeByName: make(map[string]*agentAdapter), kickRoster: make(chan struct{}, 1),
@@ -106,6 +112,30 @@ func acquireDaemonLock(root string) (func(), error) {
 
 func (d *Daemon) logf(format string, args ...any) {
 	log.Printf("transit: "+format, args...)
+}
+
+// setHerdrAvailable records the reachability of Herdr and logs only the
+// transitions. A herdr-less box polls its roster every few seconds, so logging
+// each failure would bury everything else in the daemon log.
+func (d *Daemon) setHerdrAvailable(available bool, cause error) {
+	d.mu.Lock()
+	changed := d.herdrAvailable != available
+	d.herdrAvailable = available
+	d.mu.Unlock()
+	if !changed {
+		return
+	}
+	if available {
+		d.logf("herdr available")
+		return
+	}
+	d.logf("herdr unavailable (%v); running adapter-only", cause)
+}
+
+func (d *Daemon) herdrReachable() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.herdrAvailable
 }
 
 func (d *Daemon) setLastError(err error) {

@@ -101,6 +101,14 @@ func (d *Daemon) deliverOnce(ctx context.Context, frame WireFrame) (code string,
 		return "", false, nil
 	}
 
+	// Past this point delivery means typing into a Herdr pane. Falling through
+	// to an empty roster would report `agent_not_found`, which blames the agent
+	// for a transport outage; the distinction matters because one is permanent
+	// operator error and the other clears by itself.
+	if !d.herdrReachable() {
+		return "herdr_unavailable", true, fmt.Errorf("herdr is unavailable for %s", frame.Agent)
+	}
+
 	agent, found := d.localAgentByName(frame.Agent)
 	if !found || agent.PaneID == "" {
 		return "agent_not_found", true, fmt.Errorf("agent %s not found", frame.Agent)

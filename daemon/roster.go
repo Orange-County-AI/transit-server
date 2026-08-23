@@ -50,9 +50,15 @@ func (d *Daemon) rosterLoop(ctx context.Context) {
 }
 
 func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
+	// A Herdr outage must not stop roster publication: the native adapters are
+	// still there and still deliverable, and a roster that never goes out would
+	// take them off the Worker's map along with the panes.
 	agents, err := d.herdr.ListAgents(ctx)
 	if err != nil {
-		return false, err
+		d.setHerdrAvailable(false, err)
+		agents = nil
+	} else {
+		d.setHerdrAvailable(true, nil)
 	}
 	d.mu.RLock()
 	nativeAdapters := make([]nativeAdapterRoster, 0, len(d.adapters))
