@@ -315,19 +315,14 @@ func TestAdapterRegistrationFallsBackToAutoNameWithoutAvailablePaneName(t *testi
 	for _, test := range []struct {
 		name   string
 		paneID string
-		held   bool
 	}{
 		{name: "unknown pane", paneID: "unknown"},
 		{name: "empty pane", paneID: ""},
-		{name: "native name held", paneID: "pane-1", held: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var prompts int
 			d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
 			setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
-			if test.held {
-				d.nativeNames["omp:other-session"] = nativeName{Name: "omp-pane", NamedBy: "auto"}
-			}
 
 			adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: test.paneID})
 			if adapter.name == "omp-pane" {
@@ -337,6 +332,31 @@ func TestAdapterRegistrationFallsBackToAutoNameWithoutAvailablePaneName(t *testi
 				t.Fatalf("adapter named by = %q, want %q", adapter.namedBy, "auto")
 			}
 		})
+	}
+}
+
+// A dead record holding the pane's name is an earlier incarnation of the agent
+// in that pane, not a rival for the name. Treating it as a claimant is what
+// left four titan agents registered beside their own panes under invented
+// names after the identity keys changed shape.
+func TestAdapterRegistrationAbsorbsADeadRecordHoldingItsPaneName(t *testing.T) {
+	var prompts int
+	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
+	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
+	// The shape a pre-upgrade record had: keyed by harness and session id.
+	d.nativeNames["omp:other-session"] = nativeName{
+		Name: "omp-pane", NamedBy: "herdr", Generation: 9, Token: "0123456789abcdef0123456789abcdef",
+	}
+
+	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
+	if adapter.name != "omp-pane" {
+		t.Fatalf("adapter name = %q; a dead record blocked its own pane's name", adapter.name)
+	}
+	if adapter.generation != 10 || adapter.token != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("generation/token = %d/%q; want the absorbed record's", adapter.generation, adapter.token)
+	}
+	if _, stale := d.nativeNames["omp:other-session"]; stale {
+		t.Fatal("the superseded record survived, so the name stays double-claimed")
 	}
 }
 

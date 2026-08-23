@@ -600,6 +600,35 @@ func (d *Daemon) paneAgentForRegistration(paneID string) (HerdrAgent, bool) {
 	return *agent, true
 }
 
+// absorbNameLocked takes over the records some earlier incarnation of this
+// same agent left holding `name`, folding their generation and identity
+// credential into this one and displacing any adapter still registered under
+// them. Two things establish "same agent": a launcher declaring the name, and
+// a client presenting the pane the name belongs to. Anything else is a
+// genuine collision and is caught later by the live-adapter check.
+func (d *Daemon) absorbNameLocked(
+	key, name, enrollment string, record nativeName, displaced []*agentAdapter,
+) (nativeName, []*agentAdapter) {
+	for otherKey, other := range d.nativeNames {
+		if otherKey == key || other.Name != name || other.enrollmentOrDefault() != enrollment {
+			continue
+		}
+		if live := d.adapters[otherKey]; live != nil {
+			displaced = append(displaced, live)
+			delete(d.adapters, otherKey)
+		}
+		if other.Generation > record.Generation {
+			record.Generation = other.Generation
+		}
+		if record.Token == "" {
+			record.Token = other.Token
+		}
+		delete(d.nativeTokens, other.Token)
+		delete(d.nativeNames, otherKey)
+	}
+	return record, displaced
+}
+
 func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, connection net.Conn) (*agentAdapter, string, string) {
 	if !harnessPattern.MatchString(frame.Harness) {
 		return nil, "unsupported_harness", "harness must match [a-z][a-z0-9-]{0,31}"
@@ -638,25 +667,8 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 		// The declared name IS the identity, so a record holding it under some
 		// other key is a previous incarnation of this same agent: a session
 		// that has since been resumed, or a record written before the upgrade
-		// when the key was harness and session id. Absorb its generation and
-		// drop the stale key rather than refusing the launcher's own name.
-		for otherKey, other := range d.nativeNames {
-			if otherKey == key || other.Name != frame.Name || other.enrollmentOrDefault() != enrollment {
-				continue
-			}
-			if live := d.adapters[otherKey]; live != nil {
-				displaced = append(displaced, live)
-				delete(d.adapters, otherKey)
-			}
-			if other.Generation > nameRecord.Generation {
-				nameRecord.Generation = other.Generation
-			}
-			if nameRecord.Token == "" {
-				nameRecord.Token = other.Token
-			}
-			delete(d.nativeTokens, other.Token)
-			delete(d.nativeNames, otherKey)
-		}
+		// when the key was harness and session id.
+		nameRecord, displaced = d.absorbNameLocked(key, frame.Name, enrollment, nameRecord, displaced)
 		nameRecord.Name = frame.Name
 		nameRecord.NamedBy = "user"
 		hasName = true
@@ -672,19 +684,16 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	if !hasName {
 		adopted := false
 		if hasPaneAgent && paneAgent.Name != "" {
-			claimed := false
-			for otherKey, other := range d.nativeNames {
-				if otherKey != key && other.Name == paneAgent.Name && other.enrollmentOrDefault() == enrollment {
-					claimed = true
-					break
-				}
-			}
-			if !claimed {
-				// Only the name changes: the credential and the generation
-				// belong to the identity, which is the same one either way.
-				nameRecord.Name, nameRecord.NamedBy = paneAgent.Name, "herdr"
-				adopted = true
-			}
+			// The pane says which agent occupies it and this client says it
+			// occupies that pane, so any other record holding the pane's name
+			// is an earlier incarnation of this same agent — the same
+			// reasoning as a declared name. Refusing instead left the agent
+			// registered beside its own pane under an invented name.
+			nameRecord, displaced = d.absorbNameLocked(key, paneAgent.Name, enrollment, nameRecord, displaced)
+			// Only the name changes: the credential and the generation belong
+			// to the identity, which is the same one either way.
+			nameRecord.Name, nameRecord.NamedBy = paneAgent.Name, "herdr"
+			adopted = true
 		}
 		if !adopted {
 			taken := make(map[string]bool, len(d.nativeNames)+len(d.herdrAgents))
