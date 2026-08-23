@@ -223,4 +223,142 @@ describe("cross-organization Room membership", () => {
     bob.socket.close(1000, "test complete");
     charlie.socket.close(1000, "test complete");
   });
+
+  it("restores a foreign member's live connection after revocation and reconnect", async () => {
+    const home = await signUp("room-reconnect-home@test.example", "Reconnect Home");
+    const foreign = await signUp("room-reconnect-foreign@test.example", "Reconnect Foreign");
+    const alice = await connect(await enroll(home, "reconnect-alpha"), "alice");
+    const charlieCredentials = await enroll(foreign, "reconnect-beta");
+    let charlie = await connect(charlieCredentials, "charlie");
+    const room = env.ROOM.getByName(`org:${home.orgId}:room:reconnect`);
+    await room.configure({
+      org: home.orgId,
+      name: "reconnect",
+      policy: "open",
+      createdAt: Date.now(),
+    });
+    await room.join("alice@reconnect-alpha", "creator");
+
+    const requested = await api("/api/organization-connections", {
+      cookie: home.cookie,
+      method: "POST",
+      body: { organization_slug: foreign.orgSlug },
+    });
+    const { connection } = await requested.json<{ connection: { id: string } }>();
+    expect((await api(`/api/organization-connections/${connection.id}/accept`, {
+      cookie: foreign.cookie,
+      method: "POST",
+      body: {},
+    })).status).toBe(200);
+
+    const foreignAddress = `${foreign.orgSlug}/charlie@reconnect-beta`;
+    expect(await room.join(foreignAddress, "operator", {
+      org: foreign.orgId,
+      orgSlug: foreign.orgSlug,
+      connectionId: connection.id,
+    })).toEqual({ joined: true });
+    const storedMember = await runInDurableObject(room, async (_instance, state) =>
+      state.storage.get<{ connectionId?: string }>(`member:${foreignAddress}`),
+    );
+    expect(storedMember).toMatchObject({ connectionId: connection.id });
+
+    charlie.socket.close(1000, "queue initial foreign delivery");
+    const foreignHub = env.HOST_HUB.getByName(
+      `org:${foreign.orgId}:host:reconnect-beta`,
+    );
+    await expect.poll(async () => !(await foreignHub.status()).connected).toBe(true);
+
+    await room.post(
+      "alice@reconnect-alpha",
+      "initial delivery before reconnect",
+      undefined,
+      "tx_200000000101",
+    );
+    await expect.poll(async () => (await foreignHub.status()).queueDepth).toBe(1);
+    const initiallyQueued = await runInDurableObject(foreignHub, async (_instance, state) =>
+      state.storage.list<{ connectionId?: string; messageId: string }>({ prefix: "q:" }),
+    );
+    expect([...initiallyQueued.values()]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          messageId: "tx_200000000101",
+          connectionId: connection.id,
+        }),
+      ]),
+    );
+
+    charlie = await connect(charlieCredentials, "charlie");
+    const initialDelivery = await nextDeliver(charlie);
+    expect(initialDelivery).toMatchObject({
+      t: "deliver",
+      id: "tx_200000000101",
+      agent: "charlie",
+    });
+    charlie.send({ t: "deliver_ack", id: "tx_200000000101", agent: "charlie" });
+    await expect.poll(async () => (await foreignHub.status()).queueDepth).toBe(0);
+
+    expect((await api(`/api/organization-connections/${connection.id}`, {
+      cookie: home.cookie,
+      method: "DELETE",
+    })).status).toBe(200);
+    expect(
+      (await room.detail()).members.find((member) => member.address === foreignAddress),
+    ).toMatchObject({ connected: false });
+
+    await room.post(
+      "alice@reconnect-alpha",
+      "foreign delivery while revoked",
+      undefined,
+      "tx_200000000102",
+    );
+    await expect.poll(async () =>
+      env.DB.prepare("SELECT status, last_error FROM message_delivery WHERE message_id = ? AND target_addr = ?")
+        .bind("tx_200000000102", foreignAddress)
+        .first(),
+    ).toEqual({ status: "dead", last_error: "organization_connection_revoked" });
+
+    const reconnectedRequest = await api("/api/organization-connections", {
+      cookie: home.cookie,
+      method: "POST",
+      body: { organization_slug: foreign.orgSlug },
+    });
+    const { connection: reconnected } = await reconnectedRequest.json<{ connection: { id: string } }>();
+    expect(reconnected.id).not.toBe(connection.id);
+    expect((await api(`/api/organization-connections/${reconnected.id}/accept`, {
+      cookie: foreign.cookie,
+      method: "POST",
+      body: {},
+    })).status).toBe(200);
+    expect(
+      (await room.detail()).members.find((member) => member.address === foreignAddress),
+    ).toMatchObject({ connected: true });
+
+    const restoredDelivery = nextDeliver(charlie);
+    await room.post(
+      "alice@reconnect-alpha",
+      "foreign delivery after reconnect",
+      undefined,
+      "tx_200000000103",
+    );
+    const reconnectedQueue = await runInDurableObject(foreignHub, async (_instance, state) =>
+      state.storage.list<{ connectionId?: string; messageId: string }>({ prefix: "q:" }),
+    );
+    expect([...reconnectedQueue.values()]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          messageId: "tx_200000000103",
+          connectionId: reconnected.id,
+        }),
+      ]),
+    );
+    expect(await restoredDelivery).toMatchObject({
+      t: "deliver",
+      id: "tx_200000000103",
+      agent: "charlie",
+    });
+    charlie.send({ t: "deliver_ack", id: "tx_200000000103", agent: "charlie" });
+
+    alice.socket.close(1000, "test complete");
+    charlie.socket.close(1000, "test complete");
+  });
 });

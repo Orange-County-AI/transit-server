@@ -2,7 +2,6 @@ import { DurableObject } from "cloudflare:workers";
 import { formatAgentAddress, parseAddress } from "../lib/transit/addr";
 import {
   connectedOrganizationById,
-  organizationConnectionIsActive,
   organizationSlugById,
 } from "../lib/transit/organizations";
 import { renderEnvelope } from "../lib/transit/envelope";
@@ -132,9 +131,7 @@ export class Room extends DurableObject<Env> {
           ...(member.org !== config.org
             ? {
                 ...(member.orgSlug ? { organization: member.orgSlug } : {}),
-                connected: Boolean(
-                  member.connectionId && connections.get(member.connectionId),
-                ),
+                connected: Boolean(connections.get(member.org)),
               }
             : {}),
           joinedAt: member.joinedAt,
@@ -253,8 +250,7 @@ export class Room extends DurableObject<Env> {
       if (
         !sender ||
         (sender.org !== config.org &&
-          (!sender.connectionId ||
-            !(await organizationConnectionIsActive(this.env.DB, sender.connectionId))))
+          !(await connectedOrganizationById(this.env.DB, config.org, sender.org)))
       ) {
         throw new Error("not_member");
       }
@@ -315,10 +311,9 @@ export class Room extends DurableObject<Env> {
     }
     const deliveries = await Promise.all(
       targets.map(async (member) => {
-        if (
-          member.org !== config.org &&
-          (!member.connectionId || !connections.get(member.connectionId))
-        ) {
+        const liveConnectionId =
+          member.org === config.org ? null : (connections.get(member.org) ?? null);
+        if (member.org !== config.org && !liveConnectionId) {
           return { member, error: "organization_connection_revoked" };
         }
         try {
@@ -364,7 +359,7 @@ export class Room extends DurableObject<Env> {
             }),
             roomName: config.name,
             roomSeq: entry.seq,
-            ...(member.connectionId ? { connectionId: member.connectionId } : {}),
+            ...(liveConnectionId ? { connectionId: liveConnectionId } : {}),
           });
           if (result.status === "no_route") throw new Error("no_route");
           return { member };
@@ -392,10 +387,9 @@ export class Room extends DurableObject<Env> {
     const connections = await this.connectionStates(members, config);
     const results = await Promise.all(
       members.map(async (member) => {
-        if (
-          member.org !== config.org &&
-          (!member.connectionId || !connections.get(member.connectionId))
-        ) {
+        const liveConnectionId =
+          member.org === config.org ? null : (connections.get(member.org) ?? null);
+        if (member.org !== config.org && !liveConnectionId) {
           return false;
         }
         const target = parseAddress(member.address);
@@ -409,7 +403,7 @@ export class Room extends DurableObject<Env> {
           targetAddr: target.address,
           envelope: input.envelope,
           redelivery: input.redelivery,
-          ...(member.connectionId ? { connectionId: member.connectionId } : {}),
+          ...(liveConnectionId ? { connectionId: liveConnectionId } : {}),
         });
         return queued.status !== "no_route";
       }),
@@ -435,10 +429,7 @@ export class Room extends DurableObject<Env> {
     const connections = await this.connectionStates(members, config);
     await Promise.allSettled(
       members.map(async (member) => {
-        if (
-          member.org !== config.org &&
-          (!member.connectionId || !connections.get(member.connectionId))
-        ) {
+        if (member.org !== config.org && !connections.get(member.org)) {
           return;
         }
         const target = parseAddress(member.address);
@@ -510,19 +501,32 @@ export class Room extends DurableObject<Env> {
     return [...members.values()].map((member) => this.normaliseMember(member, config));
   }
 
+  /**
+   * Current connection id per foreign member organization, or `null` when the
+   * two organizations are not connected right now.
+   *
+   * Keyed by the member's ORGANIZATION rather than by the connection id stored
+   * on the member, because a connection that is deleted and re-established
+   * comes back with a new id. Pinning to the stored id would leave a member
+   * permanently undeliverable after the organizations reconnected, which is
+   * neither what the docs promise nor how DMs behave: a DM resolves the
+   * connection afresh on every send, and the id it pins into the queue exists
+   * only to kill deliveries already in flight. Rooms now match that.
+   */
   private async connectionStates(
     members: RoomMember[],
     config: RoomConfig,
-  ): Promise<Map<string, boolean>> {
-    const connectionIds = new Set(
+  ): Promise<Map<string, string | null>> {
+    const foreignOrgs = new Set(
       members
         .filter((member) => member.org !== config.org)
-        .flatMap((member) => (member.connectionId ? [member.connectionId] : [])),
+        .map((member) => member.org),
     );
     const states = await Promise.all(
-      [...connectionIds].map(async (connectionId) => [
-        connectionId,
-        await organizationConnectionIsActive(this.env.DB, connectionId),
+      [...foreignOrgs].map(async (org) => [
+        org,
+        (await connectedOrganizationById(this.env.DB, config.org, org))
+          ?.connectionId ?? null,
       ] as const),
     );
     return new Map(states);
