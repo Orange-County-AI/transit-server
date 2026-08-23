@@ -78,10 +78,15 @@ export const room = sqliteTable(
   ],
 );
 
+// `org_id` is the ROOM OWNER's organization; `member_org_id` is the MEMBER's
+// own organization; for a home member they are equal. The `(org_id, room,
+// address)` key stays unique because foreign canonical addresses are
+// organization-qualified.
 export const roomMember = sqliteTable(
   "room_member",
   {
     orgId: text("org_id").notNull(),
+    memberOrgId: text("member_org_id").notNull().default(""),
     room: text("room").notNull(),
     address: text("address").notNull(),
     joinedAt: integer("joined_at", { mode: "timestamp_ms" }).notNull(),

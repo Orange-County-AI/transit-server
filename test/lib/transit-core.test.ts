@@ -48,6 +48,13 @@ describe("Transit addresses", () => {
     });
     expect(formatRoomAddress("ops")).toBe("#ops");
     expect(parseAddress("#ops")).toEqual({ kind: "room", room: "ops", address: "#ops" });
+    expect(formatRoomAddress("ops", "partner-org")).toBe("partner-org/#ops");
+    expect(parseAddress("partner-org/#ops")).toEqual({
+      kind: "room",
+      room: "ops",
+      organization: "partner-org",
+      address: "partner-org/#ops",
+    });
   });
 
   it("rejects invalid and reserved names", () => {
@@ -56,7 +63,11 @@ describe("Transit addresses", () => {
     expect(() => parseAddress("#Not-Lowercase")).toThrowError(AddressError);
     expect(() => parseAddress("missing-host")).toThrowError(AddressError);
     expect(() => parseAddress("Partner/bob@beta")).toThrowError(AddressError);
-    expect(() => parseAddress("partner/#ops")).toThrowError(AddressError);
+    expect(() => parseAddress("Partner/#ops")).toThrowError(AddressError);
+    expect(() => parseAddress("partner-org/#Ops")).toThrowError(AddressError);
+    expect(() => parseAddress("partner-org/#transit")).toThrowError(AddressError);
+    expect(() => parseAddress("partner-org/#")).toThrowError(AddressError);
+    expect(() => parseAddress("one/two/#ops")).toThrowError(AddressError);
     expect(() => parseAddress("one/two/bob@beta")).toThrowError(AddressError);
   });
 });

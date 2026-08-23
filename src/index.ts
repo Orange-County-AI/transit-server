@@ -21,6 +21,7 @@ import { type AuthPluginFactory, auth, noAuthPlugins } from "./lib/better-auth";
 
 import {
   AddressError,
+  formatAgentAddress,
   parseAddress,
   validateHost,
   validateName,
@@ -45,6 +46,7 @@ import {
   organizationIdBySlug,
   organizationBySlug,
   organizationPair,
+  resolveConnectedOrganization,
 } from "./lib/transit/organizations";
 import { HostHub } from "./do/host-hub";
 import { Room } from "./do/room";
@@ -701,12 +703,26 @@ app.get("/api/agents", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
   const hostFilter = context.req.query("host");
+  const requestedOrganization = context.req.query("organization");
   if (hostFilter) {
     try {
       validateHost(hostFilter);
     } catch {
       return context.json({ error: "invalid_host" }, 400);
     }
+  }
+
+  let rosterOrg = org;
+  let addressOrganization: string | null = null;
+  if (requestedOrganization) {
+    const connected = await resolveConnectedOrganization(
+      context.env.DB,
+      org,
+      requestedOrganization,
+    );
+    if (!connected) return context.json({ error: "organization_not_connected" }, 409);
+    rosterOrg = connected.targetOrgId;
+    addressOrganization = connected.targetSlug;
   }
 
   const statement = hostFilter
@@ -716,15 +732,24 @@ app.get("/api/agents", async (context) => {
          FROM agent_snapshot a JOIN host h ON h.id = a.host_id
          WHERE h.org_id = ? AND h.slug = ? AND h.revoked_at IS NULL
          ORDER BY a.name`,
-      ).bind(org, hostFilter)
+      ).bind(rosterOrg, hostFilter)
     : context.env.DB.prepare(
         `SELECT a.name, a.kind, a.pane_id, a.status, a.named_by, a.title, a.cwd,
                 a.updated_at, h.slug AS host
          FROM agent_snapshot a JOIN host h ON h.id = a.host_id
          WHERE h.org_id = ? AND h.revoked_at IS NULL
          ORDER BY h.slug, a.name`,
-      ).bind(org);
-  return context.json({ agents: (await statement.all()).results });
+      ).bind(rosterOrg);
+  const agents = (await statement.all<{ name: string; host: string }>()).results;
+  return context.json({
+    agents: addressOrganization
+      ? agents.map((agent) => ({
+          ...agent,
+          organization: addressOrganization,
+          address: formatAgentAddress(agent.name, agent.host, addressOrganization),
+        }))
+      : agents,
+  });
 });
 
 app.get("/api/activity", async (context) => {
@@ -762,7 +787,8 @@ app.get("/api/rooms", async (context) => {
             COUNT(DISTINCT rm.address) AS members,
             COUNT(DISTINCT CASE WHEN msg.created_at >= ? THEN msg.id END) AS messages_24h
      FROM room r
-     LEFT JOIN room_member rm ON rm.org_id = r.org_id AND rm.room = r.name
+     LEFT JOIN room_member rm
+       ON rm.org_id = r.org_id /* deliberate: room owner organization */ AND rm.room = r.name
      LEFT JOIN message msg
        ON msg.org_id = r.org_id AND msg.to_addr = '#' || r.name AND msg.kind = 'room'
      WHERE r.org_id = ?
@@ -832,19 +858,37 @@ app.post("/api/rooms/:name/members", async (context) => {
     return context.json({ error: "invalid_address" }, 400);
   }
   if (address.kind !== "agent") return context.json({ error: "invalid_address" }, 400);
+
+  const connected = address.organization
+    ? await resolveConnectedOrganization(context.env.DB, org, address.organization)
+    : null;
+  if (address.organization && !connected) {
+    return context.json({ error: "organization_not_connected" }, 409);
+  }
+  const memberOrg = connected?.targetOrgId ?? org;
   const agent = await context.env.DB.prepare(
     `SELECT 1 AS present
      FROM agent_snapshot a JOIN host h ON h.id = a.host_id
      WHERE h.org_id = ? AND h.slug = ? AND a.name = ? AND h.revoked_at IS NULL
      LIMIT 1`,
   )
-    .bind(org, address.host, address.name)
+    .bind(memberOrg, address.host, address.name)
     .first();
   if (!agent) return context.json({ error: "agent_not_found" }, 404);
   try {
     const result = await context.env.ROOM.getByName(
       `org:${org}:room:${name}`,
-    ).join(address.address, "operator");
+    ).join(
+      address.address,
+      "operator",
+      connected
+        ? {
+            org: connected.targetOrgId,
+            orgSlug: connected.targetSlug,
+            connectionId: connected.connectionId,
+          }
+        : undefined,
+    );
     if (result.error) return context.json({ error: result.error }, 409);
     return context.json(result);
   } catch (error) {

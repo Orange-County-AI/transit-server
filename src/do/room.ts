@@ -1,5 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
-import { parseAddress } from "../lib/transit/addr";
+import { formatAgentAddress, parseAddress } from "../lib/transit/addr";
+import {
+  connectedOrganizationById,
+  organizationSlugById,
+} from "../lib/transit/organizations";
 import { renderEnvelope } from "../lib/transit/envelope";
 import { txId } from "../lib/transit/ids";
 
@@ -13,6 +17,17 @@ export type RoomPolicy = "open" | "invite";
 
 export type RoomMember = {
   address: string;
+  org: string;
+  orgSlug?: string;
+  connectionId?: string;
+  joinedAt: number;
+  lastAckedSeq: number;
+};
+
+export type RoomMemberView = {
+  address: string;
+  organization?: string;
+  connected?: boolean;
   joinedAt: number;
   lastAckedSeq: number;
 };
@@ -31,15 +46,21 @@ export type RoomDetail = {
   name: string;
   policy: RoomPolicy;
   sequence: number;
-  members: RoomMember[];
+  members: RoomMemberView[];
   messages: RoomEntry[];
 };
 
 type RoomConfig = {
   org: string;
+  orgSlug?: string;
   name: string;
   policy: RoomPolicy;
   createdAt: number;
+};
+
+type RoomDeliveryOutcome = {
+  member: RoomMember;
+  error?: string;
 };
 
 export type RoomChannelDelivery = {
@@ -92,7 +113,8 @@ export class Room extends DurableObject<Env> {
 
   async detail(limit = 200): Promise<RoomDetail> {
     const config = await this.requireConfig();
-    const members = await this.ctx.storage.list<RoomMember>({ prefix: "member:" });
+    const members = await this.members(config);
+    const connections = await this.connectionStates(members, config);
     const messages = await this.ctx.storage.list<RoomEntry>({
       prefix: "message:",
       reverse: true,
@@ -103,26 +125,61 @@ export class Room extends DurableObject<Env> {
       name: config.name,
       policy: config.policy,
       sequence: (await this.ctx.storage.get<number>("sequence")) ?? 0,
-      members: [...members.values()].sort((left, right) =>
-        left.address.localeCompare(right.address),
-      ),
+      members: members
+        .map((member) => ({
+          address: member.address,
+          ...(member.org !== config.org
+            ? {
+                ...(member.orgSlug ? { organization: member.orgSlug } : {}),
+                connected: Boolean(connections.get(member.org)),
+              }
+            : {}),
+          joinedAt: member.joinedAt,
+          lastAckedSeq: member.lastAckedSeq,
+        }))
+        .sort((left, right) => left.address.localeCompare(right.address)),
       messages: [...messages.values()].sort((left, right) => left.seq - right.seq),
     };
   }
 
   async hasMember(address: string): Promise<boolean> {
-    return (await this.ctx.storage.get<RoomMember>(`member:${address}`)) !== undefined;
+    const config = await this.requireConfig();
+    const member = await this.ctx.storage.get<RoomMember>(`member:${address}`);
+    if (!member) return false;
+    this.normaliseMember(member, config);
+    return true;
   }
 
   async join(
     address: string,
     source: "agent" | "creator" | "operator",
-  ): Promise<{ joined: boolean; error?: "invite_only" | "room_full" }> {
+    memberInput?: { org: string; orgSlug: string; connectionId: string },
+  ): Promise<{
+    joined: boolean;
+    error?: "invite_only" | "room_full" | "not_connected";
+  }> {
     const config = await this.requireConfig();
     const parsed = parseAddress(address);
     if (parsed.kind !== "agent") throw new Error("room members must be agents");
     if (config.policy === "invite" && source === "agent") {
       return { joined: false, error: "invite_only" };
+    }
+    if (memberInput) {
+      const connected = await connectedOrganizationById(
+        this.env.DB,
+        config.org,
+        memberInput.org,
+      );
+      if (
+        !connected ||
+        connected.peerSlug !== memberInput.orgSlug ||
+        connected.connectionId !== memberInput.connectionId ||
+        parsed.organization !== memberInput.orgSlug
+      ) {
+        return { joined: false, error: "not_connected" };
+      }
+    } else if (parsed.organization) {
+      return { joined: false, error: "not_connected" };
     }
     if (await this.hasMember(parsed.address)) return { joined: false };
 
@@ -130,18 +187,23 @@ export class Room extends DurableObject<Env> {
     if (members.size >= MAX_ROOM_MEMBERS) return { joined: false, error: "room_full" };
     const member: RoomMember = {
       address: parsed.address,
+      org: memberInput?.org ?? config.org,
+      ...(memberInput
+        ? { orgSlug: memberInput.orgSlug, connectionId: memberInput.connectionId }
+        : {}),
       joinedAt: Date.now(),
       lastAckedSeq: 0,
     };
     await this.ctx.storage.put(`member:${parsed.address}`, member);
+    // org_id is the room owner; member_org_id is the joined member's organization.
     this.background(
       "room_member_write_failed",
       this.env.DB.prepare(
-        `INSERT INTO room_member (org_id, room, address, joined_at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO room_member (org_id, member_org_id, room, address, joined_at)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(org_id, room, address) DO NOTHING`,
       )
-        .bind(config.org, config.name, parsed.address, member.joinedAt)
+        .bind(config.org, member.org, config.name, parsed.address, member.joinedAt)
         .run(),
     );
     this.broadcast({ type: "member_joined", at: Date.now(), member });
@@ -152,6 +214,7 @@ export class Room extends DurableObject<Env> {
     const config = await this.requireConfig();
     const left = await this.ctx.storage.delete(`member:${address}`);
     if (!left) return { left: false };
+    // org_id is the room owner; member_org_id identifies members and is not scoped here.
     this.background(
       "room_member_delete_failed",
       this.env.DB.prepare(
@@ -179,8 +242,18 @@ export class Room extends DurableObject<Env> {
     if (textEncoder.encode(body).byteLength > MAX_MESSAGE_BYTES) {
       throw new Error("body_too_large");
     }
-    if (from !== "operator@transit" && !(await this.hasMember(from))) {
-      throw new Error("not_member");
+    let sender: RoomMember | undefined;
+    if (from !== "operator@transit") {
+      if (!(await this.hasMember(from))) throw new Error("not_member");
+      const storedSender = await this.ctx.storage.get<RoomMember>(`member:${from}`);
+      sender = storedSender ? this.normaliseMember(storedSender, config) : undefined;
+      if (
+        !sender ||
+        (sender.org !== config.org &&
+          !(await connectedOrganizationById(this.env.DB, config.org, sender.org)))
+      ) {
+        throw new Error("not_member");
+      }
     }
     if (messageId) {
       const existingSequence = await this.ctx.storage.get<number>(`message_id:${messageId}`);
@@ -220,57 +293,109 @@ export class Room extends DurableObject<Env> {
     const entry = committed.entry;
     if (committed.duplicate) return entry;
 
-    const members = await this.ctx.storage.list<RoomMember>({ prefix: "member:" });
-    const targets = [...members.values()].filter((member) => member.address !== from);
-    const deliveries = await Promise.allSettled(
+    const targets = (await this.members(config)).filter((member) => member.address !== from);
+    const connections = await this.connectionStates(targets, config);
+    const roomOrgSlug = targets.some((member) => member.org !== config.org)
+      ? await this.roomOrgSlug(config)
+      : undefined;
+    const senderAddress = from === "operator@transit" ? undefined : parseAddress(from);
+    if (senderAddress && senderAddress.kind !== "agent") {
+      throw new Error("invalid member address");
+    }
+    const senderOrgSlug =
+      sender && sender.org !== config.org
+        ? sender.orgSlug ?? (await organizationSlugById(this.env.DB, sender.org))
+        : roomOrgSlug;
+    if (sender && sender.org !== config.org && !senderOrgSlug) {
+      throw new Error("sender organization not found");
+    }
+    const deliveries = await Promise.all(
       targets.map(async (member) => {
-        const target = parseAddress(member.address);
-        if (target.kind !== "agent") throw new Error("invalid member address");
-        const hub = this.env.HOST_HUB.getByName(
-          `org:${config.org}:host:${target.host}`,
-        );
-        const result = await hub.queueDelivery({
-          messageId: entry.id,
-          org: config.org,
-          agent: target.name,
-          targetAddr: target.address,
-          envelope: renderEnvelope({
-            from,
-            id: entry.id,
-            ts: new Date(entry.createdAt).toISOString(),
-            kind: "room",
-            room: config.name,
-            seq: entry.seq,
-            body,
-            replyTo,
-            replyTarget: from === "operator@transit" ? `#${config.name}` : undefined,
-          }),
-          roomName: config.name,
-          roomSeq: entry.seq,
-        });
-        if (result.status === "no_route") throw new Error("no_route");
-        return member.address;
+        const liveConnectionId =
+          member.org === config.org ? null : (connections.get(member.org) ?? null);
+        if (member.org !== config.org && !liveConnectionId) {
+          return { member, error: "organization_connection_revoked" };
+        }
+        try {
+          const target = parseAddress(member.address);
+          if (target.kind !== "agent") throw new Error("invalid member address");
+          const sameOrganization = !sender || sender.org === member.org;
+          const envelopeFrom =
+            from === "operator@transit"
+              ? from
+              : sameOrganization
+                ? formatAgentAddress(senderAddress!.name, senderAddress!.host)
+                : formatAgentAddress(
+                    senderAddress!.name,
+                    senderAddress!.host,
+                    senderOrgSlug!,
+                  );
+          const hub = this.env.HOST_HUB.getByName(
+            `org:${member.org}:host:${target.host}`,
+          );
+          const result = await hub.queueDelivery({
+            messageId: entry.id,
+            org: config.org,
+            agent: target.name,
+            targetAddr: target.address,
+            envelope: renderEnvelope({
+              from: envelopeFrom,
+              id: entry.id,
+              ts: new Date(entry.createdAt).toISOString(),
+              kind: "room",
+              room:
+                member.org === config.org
+                  ? config.name
+                  : `${roomOrgSlug}/${config.name}`,
+              seq: entry.seq,
+              body,
+              replyTo,
+              replyTarget:
+                member.org !== config.org
+                  ? `${roomOrgSlug}/#${config.name}`
+                  : from === "operator@transit"
+                    ? `#${config.name}`
+                    : undefined,
+            }),
+            roomName: config.name,
+            roomSeq: entry.seq,
+            ...(liveConnectionId ? { connectionId: liveConnectionId } : {}),
+          });
+          if (result.status === "no_route") throw new Error("no_route");
+          return { member };
+        } catch (error) {
+          return {
+            member,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
       }),
     );
 
-    this.mirrorEntry(config, entry, targets, deliveries);
-
+    this.mirrorEntry(config, entry, deliveries);
     this.broadcast({ type: "message", at: Date.now(), message: entry });
     this.ctx.waitUntil(this.pruneLedger());
     return entry;
   }
+
   async queueChannelDelivery(
     input: RoomChannelDelivery,
   ): Promise<{ queued: number }> {
     const config = await this.requireConfig();
     if (input.org !== config.org) throw new Error("room organization mismatch");
-    const members = await this.ctx.storage.list<RoomMember>({ prefix: "member:" });
+    const members = await this.members(config);
+    const connections = await this.connectionStates(members, config);
     const results = await Promise.all(
-      [...members.values()].map(async (member) => {
+      members.map(async (member) => {
+        const liveConnectionId =
+          member.org === config.org ? null : (connections.get(member.org) ?? null);
+        if (member.org !== config.org && !liveConnectionId) {
+          return false;
+        }
         const target = parseAddress(member.address);
         if (target.kind !== "agent") return false;
         const queued = await this.env.HOST_HUB.getByName(
-          `org:${config.org}:host:${target.host}`,
+          `org:${member.org}:host:${target.host}`,
         ).queueDelivery({
           messageId: input.deliveryId,
           org: config.org,
@@ -278,6 +403,7 @@ export class Room extends DurableObject<Env> {
           targetAddr: target.address,
           envelope: input.envelope,
           redelivery: input.redelivery,
+          ...(liveConnectionId ? { connectionId: liveConnectionId } : {}),
         });
         return queued.status !== "no_route";
       }),
@@ -286,9 +412,12 @@ export class Room extends DurableObject<Env> {
   }
 
   async acknowledge(address: string, sequence: number): Promise<void> {
+    const config = await this.requireConfig();
     const key = `member:${address}`;
-    const member = await this.ctx.storage.get<RoomMember>(key);
-    if (!member || sequence <= member.lastAckedSeq) return;
+    const stored = await this.ctx.storage.get<RoomMember>(key);
+    if (!stored) return;
+    const member = this.normaliseMember(stored, config);
+    if (sequence <= member.lastAckedSeq) return;
     member.lastAckedSeq = sequence;
     await this.ctx.storage.put(key, member);
     this.broadcast({ type: "member_ack", at: Date.now(), address, sequence });
@@ -296,13 +425,17 @@ export class Room extends DurableObject<Env> {
 
   async cancelChannelDelivery(deliveryId: string): Promise<void> {
     const config = await this.requireConfig();
-    const members = await this.ctx.storage.list<RoomMember>({ prefix: "member:" });
+    const members = await this.members(config);
+    const connections = await this.connectionStates(members, config);
     await Promise.allSettled(
-      [...members.values()].map(async (member) => {
+      members.map(async (member) => {
+        if (member.org !== config.org && !connections.get(member.org)) {
+          return;
+        }
         const target = parseAddress(member.address);
         if (target.kind !== "agent") return;
         await this.env.HOST_HUB.getByName(
-          `org:${config.org}:host:${target.host}`,
+          `org:${member.org}:host:${target.host}`,
         ).cancelDelivery(deliveryId);
       }),
     );
@@ -311,6 +444,7 @@ export class Room extends DurableObject<Env> {
   async destroy(): Promise<void> {
     const config = await this.requireConfig();
     await this.ctx.storage.deleteAll();
+    // org_id is the room owner; member_org_id identifies members and is not scoped here.
     this.background(
       "room_delete_failed",
       this.env.DB.batch([
@@ -349,6 +483,55 @@ export class Room extends DurableObject<Env> {
     return config;
   }
 
+  private async roomOrgSlug(config: RoomConfig): Promise<string> {
+    if (config.orgSlug) return config.orgSlug;
+    const orgSlug = await organizationSlugById(this.env.DB, config.org);
+    if (!orgSlug) throw new Error("room organization not found");
+    config.orgSlug = orgSlug;
+    await this.ctx.storage.put("config", config);
+    return orgSlug;
+  }
+
+  private normaliseMember(member: RoomMember, config: RoomConfig): RoomMember {
+    return member.org ? member : { ...member, org: config.org };
+  }
+
+  private async members(config: RoomConfig): Promise<RoomMember[]> {
+    const members = await this.ctx.storage.list<RoomMember>({ prefix: "member:" });
+    return [...members.values()].map((member) => this.normaliseMember(member, config));
+  }
+
+  /**
+   * Current connection id per foreign member organization, or `null` when the
+   * two organizations are not connected right now.
+   *
+   * Keyed by the member's ORGANIZATION rather than by the connection id stored
+   * on the member, because a connection that is deleted and re-established
+   * comes back with a new id. Pinning to the stored id would leave a member
+   * permanently undeliverable after the organizations reconnected, which is
+   * neither what the docs promise nor how DMs behave: a DM resolves the
+   * connection afresh on every send, and the id it pins into the queue exists
+   * only to kill deliveries already in flight. Rooms now match that.
+   */
+  private async connectionStates(
+    members: RoomMember[],
+    config: RoomConfig,
+  ): Promise<Map<string, string | null>> {
+    const foreignOrgs = new Set(
+      members
+        .filter((member) => member.org !== config.org)
+        .map((member) => member.org),
+    );
+    const states = await Promise.all(
+      [...foreignOrgs].map(async (org) => [
+        org,
+        (await connectedOrganizationById(this.env.DB, config.org, org))
+          ?.connectionId ?? null,
+      ] as const),
+    );
+    return new Map(states);
+  }
+
   /**
    * Metering seam — mirrors `HostHub.meterMessages`. Returning a statement
    * appends it to the archive batch directly after the message insert, whose
@@ -361,8 +544,7 @@ export class Room extends DurableObject<Env> {
   private mirrorEntry(
     config: RoomConfig,
     entry: RoomEntry,
-    targets: RoomMember[],
-    deliveries: PromiseSettledResult<string>[],
+    deliveries: RoomDeliveryOutcome[],
   ): void {
     const meter = this.meterMessages(config.org, 1);
     const statements: D1PreparedStatement[] = [
@@ -382,9 +564,7 @@ export class Room extends DurableObject<Env> {
       ),
     ];
     if (meter) statements.push(meter);
-    for (const [index, target] of targets.entries()) {
-      const outcome = deliveries[index];
-      const failed = outcome?.status === "rejected";
+    for (const delivery of deliveries) {
       statements.push(
         this.env.DB.prepare(
           `INSERT INTO message_delivery
@@ -393,9 +573,9 @@ export class Room extends DurableObject<Env> {
            ON CONFLICT(message_id, target_addr) DO NOTHING`,
         ).bind(
           entry.id,
-          target.address,
-          failed ? "dead" : "queued",
-          failed ? String(outcome.reason) : null,
+          delivery.member.address,
+          delivery.error ? "dead" : "queued",
+          delivery.error ?? null,
           Date.now(),
         ),
       );

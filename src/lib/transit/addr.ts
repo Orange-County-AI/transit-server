@@ -25,6 +25,12 @@ export type AgentAddress = {
 export type RoomAddress = {
   kind: "room";
   room: string;
+  /**
+   * Owning organization slug, present only on a qualified `organization/#room`
+   * address. Absent means "a room in the caller's own organization" — the
+   * original grammar, unchanged.
+   */
+  organization?: string;
   address: string;
 };
 
@@ -79,47 +85,63 @@ export function formatAgentAddress(
   return organization ? `${organization}/${local}` : local;
 }
 
-export function formatRoomAddress(room: string): string {
+export function formatRoomAddress(room: string, organization?: string): string {
   validateName(room);
-  return `#${room}`;
+  if (organization) validateOrganizationSlug(organization);
+  return organization ? `${organization}/#${room}` : `#${room}`;
+}
+
+const ADDRESS_GRAMMAR =
+  "address must be name@host, organization/name@host, #room, or organization/#room";
+
+/**
+ * Lenient room-target parser for tool parameters, which have always accepted a
+ * bare room name as well as `#room`. Accepts `room`, `#room`, `org/room`, and
+ * `org/#room`; rejects everything an address parse would reject.
+ */
+export function parseRoomTarget(value: string): RoomAddress {
+  const slash = value.indexOf("/");
+  if (slash < 0) {
+    return parseAddress(value.startsWith("#") ? value : `#${value}`) as RoomAddress;
+  }
+  const local = value.slice(slash + 1);
+  const qualified = `${value.slice(0, slash)}/${local.startsWith("#") ? local : `#${local}`}`;
+  const parsed = parseAddress(qualified);
+  if (parsed.kind !== "room") throw new AddressError(ADDRESS_GRAMMAR, "invalid_address");
+  return parsed;
 }
 
 export function parseAddress(value: string): TransitAddress {
-  if (value.startsWith("#")) {
-    const room = value.slice(1);
-    validateName(room);
-    return { kind: "room", room, address: `#${room}` };
-  }
-
   let organization: string | undefined;
-  let agentValue = value;
+  let local = value;
   const slash = value.indexOf("/");
   if (slash >= 0) {
     if (slash === 0 || slash !== value.lastIndexOf("/") || slash === value.length - 1) {
-      throw new AddressError(
-        "address must be name@host, organization/name@host, or #room",
-        "invalid_address",
-      );
+      throw new AddressError(ADDRESS_GRAMMAR, "invalid_address");
     }
     organization = value.slice(0, slash);
     validateOrganizationSlug(organization);
-    agentValue = value.slice(slash + 1);
+    local = value.slice(slash + 1);
   }
 
-  const at = agentValue.indexOf("@");
-  if (
-    at <= 0 ||
-    at !== agentValue.lastIndexOf("@") ||
-    at === agentValue.length - 1
-  ) {
-    throw new AddressError(
-      "address must be name@host, organization/name@host, or #room",
-      "invalid_address",
-    );
+  if (local.startsWith("#")) {
+    const room = local.slice(1);
+    validateName(room);
+    return {
+      kind: "room",
+      room,
+      ...(organization ? { organization } : {}),
+      address: formatRoomAddress(room, organization),
+    };
   }
 
-  const name = agentValue.slice(0, at);
-  const host = agentValue.slice(at + 1);
+  const at = local.indexOf("@");
+  if (at <= 0 || at !== local.lastIndexOf("@") || at === local.length - 1) {
+    throw new AddressError(ADDRESS_GRAMMAR, "invalid_address");
+  }
+
+  const name = local.slice(0, at);
+  const host = local.slice(at + 1);
   validateName(name);
   validateHost(host);
   return {

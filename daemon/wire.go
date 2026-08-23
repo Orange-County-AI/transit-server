@@ -75,7 +75,7 @@ func parseAgentAddress(address string) (name, host string, err error) {
 	agentAddress := address
 	if strings.Contains(address, "/") {
 		if strings.Count(address, "/") != 1 {
-			return "", "", fmt.Errorf("address must be name@host, organization/name@host, or #room")
+			return "", "", fmt.Errorf("address must be name@host, organization/name@host, #room, or organization/#room")
 		}
 		organization, local, _ := strings.Cut(address, "/")
 		if len(organization) < 2 || len(organization) > 128 ||
@@ -83,9 +83,16 @@ func parseAgentAddress(address string) (name, host string, err error) {
 			return "", "", fmt.Errorf("invalid organization in address %q", address)
 		}
 		agentAddress = local
+		if strings.HasPrefix(agentAddress, "#") {
+			room := strings.TrimPrefix(agentAddress, "#")
+			if !namePattern.MatchString(room) || reservedNames[room] {
+				return "", "", fmt.Errorf("invalid room address %q", address)
+			}
+			return "#" + room, "", nil
+		}
 	}
 	if strings.Count(agentAddress, "@") != 1 {
-		return "", "", fmt.Errorf("address must be name@host, organization/name@host, or #room")
+		return "", "", fmt.Errorf("address must be name@host, organization/name@host, #room, or organization/#room")
 	}
 	name, host, _ = strings.Cut(agentAddress, "@")
 	if !namePattern.MatchString(name) || !hostPattern.MatchString(host) {

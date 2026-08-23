@@ -6,7 +6,9 @@ import { createRoom } from "../lib/transit/rooms";
 import {
   AddressError,
   formatAgentAddress,
+  formatRoomAddress,
   parseAddress,
+  parseRoomTarget,
 } from "../lib/transit/addr";
 import {
   type AlarmBudgetStatus,
@@ -646,20 +648,39 @@ export class HostHub extends DurableObject<Env> {
       return;
     }
     if (target.kind === "room") {
+      let roomOrg = identity.org;
+      let memberAddress = from.address;
+      if (target.organization) {
+        const connected = await resolveConnectedOrganization(
+          this.env.DB,
+          identity.org,
+          target.organization,
+        );
+        if (!connected) {
+          await this.rejectSend(socket, stateKey, frame.id, "no_route");
+          return;
+        }
+        roomOrg = connected.targetOrgId;
+        memberAddress = formatAgentAddress(
+          from.name,
+          from.host,
+          connected.sourceSlug,
+        );
+      }
       const roomExists = await this.env.DB.prepare(
         "SELECT 1 AS present FROM room WHERE org_id = ? AND name = ? LIMIT 1",
       )
-        .bind(identity.org, target.room)
+        .bind(roomOrg, target.room)
         .first<{ present: number }>();
       const room = this.env.ROOM.getByName(
-        `org:${identity.org}:room:${target.room}`,
+        `org:${roomOrg}:room:${target.room}`,
       );
-      if (!roomExists || !(await room.hasMember(from.address))) {
+      if (!roomExists || !(await room.hasMember(memberAddress))) {
         await this.rejectSend(socket, stateKey, frame.id, "not_member");
         return;
       }
       try {
-        await room.post(from.address, frame.body, frame.reply_to, frame.id);
+        await room.post(memberAddress, frame.body, frame.reply_to, frame.id);
       } catch (error) {
         const code: SendNakCode =
           error instanceof Error && error.message === "body_too_large"
@@ -1265,7 +1286,24 @@ export class HostHub extends DurableObject<Env> {
             }))
           : agents;
       } else if (method === "list_rooms") {
-        result = (
+        const requestedOrganization =
+          typeof params.organization === "string" && params.organization
+            ? params.organization
+            : null;
+        let roomOrg = identity.org;
+        let addressOrganization: string | null = null;
+        if (requestedOrganization) {
+          const connected = await resolveConnectedOrganization(
+            this.env.DB,
+            identity.org,
+            requestedOrganization,
+          );
+          if (!connected) throw new Error("organization is not connected");
+          roomOrg = connected.targetOrgId;
+          addressOrganization = connected.targetSlug;
+        }
+        // room_member.org_id is the room owner's organization, not the member's.
+        const rooms = (
           await this.env.DB.prepare(
             `SELECT r.name, r.policy, r.created_at, COUNT(m.address) AS members
              FROM room r LEFT JOIN room_member m
@@ -1274,9 +1312,16 @@ export class HostHub extends DurableObject<Env> {
              GROUP BY r.org_id, r.name
              ORDER BY r.name`,
           )
-            .bind(identity.org)
-            .all()
+            .bind(roomOrg)
+            .all<{ name: string; policy: string; created_at: number; members: number }>()
         ).results;
+        result = addressOrganization
+          ? rooms.map((room) => ({
+              ...room,
+              organization: addressOrganization,
+              address: `${addressOrganization}/${formatRoomAddress(room.name)}`,
+            }))
+          : rooms;
       } else if (
         method === "create_room" ||
         method === "join_room" ||
@@ -1285,12 +1330,9 @@ export class HostHub extends DurableObject<Env> {
         if (typeof params.room !== "string" || typeof params.address !== "string") {
           throw new Error("room and address are required");
         }
-        const parsedRoom = parseAddress(
-          params.room.startsWith("#") ? params.room : `#${params.room}`,
-        );
+        const parsedRoom = parseRoomTarget(params.room);
         const caller = parseAddress(params.address);
         if (
-          parsedRoom.kind !== "room" ||
           caller.kind !== "agent" ||
           caller.organization !== undefined ||
           caller.host !== identity.slug ||
@@ -1299,6 +1341,9 @@ export class HostHub extends DurableObject<Env> {
           throw new Error("invalid room caller");
         }
         if (method === "create_room") {
+          if (parsedRoom.organization) {
+            throw new Error("cannot create a room in another organization");
+          }
           const policy = params.policy ?? "open";
           if (policy !== "open" && policy !== "invite") {
             throw new Error("room policy must be open or invite");
@@ -1312,15 +1357,39 @@ export class HostHub extends DurableObject<Env> {
           if (!created.created) throw new Error("room_exists");
           result = { room: created.room, joined: true };
         } else {
+          let roomOrg = identity.org;
+          let memberAddress = caller.address;
+          let member:
+            | { org: string; orgSlug: string; connectionId: string }
+            | undefined;
+          if (parsedRoom.organization) {
+            const connected = await resolveConnectedOrganization(
+              this.env.DB,
+              identity.org,
+              parsedRoom.organization,
+            );
+            if (!connected) throw new Error("organization is not connected");
+            roomOrg = connected.targetOrgId;
+            memberAddress = formatAgentAddress(
+              caller.name,
+              caller.host,
+              connected.sourceSlug,
+            );
+            member = {
+              org: identity.org,
+              orgSlug: connected.sourceSlug,
+              connectionId: connected.connectionId,
+            };
+          }
           const room = this.env.ROOM.getByName(
-            `org:${identity.org}:room:${parsedRoom.room}`,
+            `org:${roomOrg}:room:${parsedRoom.room}`,
           );
           if (method === "join_room") {
-            const joined = await room.join(caller.address, "agent");
+            const joined = await room.join(memberAddress, "agent", member);
             if (joined.error) throw new Error(joined.error);
             result = joined;
           } else {
-            result = await room.leave(caller.address);
+            result = await room.leave(memberAddress);
           }
         }
       } else {

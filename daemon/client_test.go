@@ -89,6 +89,38 @@ func TestNumericHostSlug(t *testing.T) {
 	}
 }
 
+func TestParseAgentAddressRoomForms(t *testing.T) {
+	tests := []struct {
+		address  string
+		name     string
+		host     string
+		wantError bool
+	}{
+		{address: "#ops", name: "#ops"},
+		{address: "peer-org/#ops", name: "#ops"},
+		{address: "peer-org/#Ops", wantError: true},
+		{address: "peer-org/#transit", wantError: true},
+		{address: "Peer/#ops", wantError: true},
+		{address: "a/b/#ops", wantError: true},
+		{address: "peer-org/#", wantError: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.address, func(t *testing.T) {
+			name, host, err := parseAgentAddress(test.address)
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("parseAgentAddress(%q) succeeded: %q, %q", test.address, name, host)
+				}
+				return
+			}
+			if err != nil || name != test.name || host != test.host {
+				t.Fatalf("parseAgentAddress(%q) = %q, %q, %v; want %q, %q, nil", test.address, name, host, err, test.name, test.host)
+			}
+		})
+	}
+}
+
 func TestDeliverNakIncludesFalseRetryable(t *testing.T) {
 	retryable := false
 	data, err := json.Marshal(WireFrame{
