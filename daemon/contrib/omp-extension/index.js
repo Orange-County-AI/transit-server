@@ -2,6 +2,13 @@ import net from "node:net";
 import path from "node:path";
 
 export const RECEIPT_ENTRY_TYPE = "transit-delivery-receipt";
+// The daemon issues an identity credential and this session stores it in its
+// own branch, which is precisely the thing OMP carries across a `--resume`.
+// A resumed session arrives with a new session id and the same branch, so
+// re-presenting the token is what keeps the agent's address from changing
+// under it. No lineage file, no key to guess, no way for two sessions to
+// collide on one.
+export const IDENTITY_ENTRY_TYPE = "transit-agent-identity";
 
 const MAX_FRAME_BYTES = 1024 * 1024;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
@@ -20,6 +27,19 @@ export function receiptIdsFromBranch(branch) {
 		}
 	}
 	return receipts;
+}
+
+// The most recent token the daemon issued this lineage. Later entries win: a
+// branch that outlived a daemon rebuild carries both.
+export function identityTokenFromBranch(branch) {
+	let token = "";
+	for (const entry of branch) {
+		if (entry?.type !== "custom" || entry.customType !== IDENTITY_ENTRY_TYPE) continue;
+		if (typeof entry.data?.token === "string" && entry.data.token.length > 0) {
+			token = entry.data.token;
+		}
+	}
+	return token;
 }
 
 // The address this workspace already publishes, if the launcher set one.
@@ -63,13 +83,11 @@ export class TransitClient {
 	#reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
 	#outbound = [];
 	#receipts;
+	#token;
 	#inFlight = new Map();
 	#status = "idle";
 
 	constructor({ pi, ctx, harness = "omp", socketPath = agentSocketPath(), env = process.env }) {
-		if (harness !== "omp" && harness !== "pi") {
-			throw new Error(`unsupported Transit extension harness: ${harness}`);
-		}
 		this.#pi = pi;
 		this.#ctx = ctx;
 		this.#env = env;
@@ -77,6 +95,7 @@ export class TransitClient {
 		this.#socketPath = socketPath;
 		this.#sessionId = ctx.sessionManager.getSessionId();
 		this.#receipts = receiptIdsFromBranch(ctx.sessionManager.getBranch());
+		this.#token = identityTokenFromBranch(ctx.sessionManager.getBranch());
 		this.#setTimeout = typeof ctx.setTimeout === "function" ? ctx.setTimeout.bind(ctx) : setTimeout;
 		this.#clearTimer = typeof ctx.clearTimer === "function" ? ctx.clearTimer.bind(ctx) : clearTimeout;
 	}
@@ -130,6 +149,9 @@ export class TransitClient {
 				// alongside its own Herdr entry instead of superseding it.
 				...(name ? { name } : {}),
 				...(paneID ? { pane_id: paneID } : {}),
+				// Without a declared name this is the only thing that keeps the
+				// address stable across a resume, which mints a new session id.
+				...(this.#token ? { agent_token: this.#token } : {}),
 			});
 		});
 		socket.on("data", chunk => this.#onData(chunk));
@@ -182,6 +204,9 @@ export class TransitClient {
 	#handleFrame(frame) {
 		if (!frame || typeof frame !== "object") return;
 		if (frame.t === "registered") {
+			if (typeof frame.agent_token === "string" && frame.agent_token.length > 0) {
+				void this.#rememberToken(frame.agent_token);
+			}
 			if (typeof frame.capability === "string" && frame.capability.length > 0) {
 				this.#capability = frame.capability;
 				this.#flushOutbound();
@@ -196,6 +221,20 @@ export class TransitClient {
 			void this.#deliver(frame.id, frame.envelope);
 		}
 		// Unknown frames are intentionally ignored for protocol forward compatibility.
+	}
+
+	// A token is written to the branch once. Failing to persist it costs this
+	// lineage its stable address on the next resume, and nothing else, so it
+	// must never take the registration down with it.
+	async #rememberToken(token) {
+		if (this.#token === token) return;
+		this.#token = token;
+		try {
+			await this.#pi.appendEntry(IDENTITY_ENTRY_TYPE, { token });
+		} catch {
+			// Left in memory: this connection keeps the identity, the next one
+			// falls back to the session id.
+		}
 	}
 
 	async #deliver(id, envelope) {

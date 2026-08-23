@@ -4,7 +4,7 @@ import net from "node:net";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
-import { RECEIPT_ENTRY_TYPE, TransitClient } from "./index.js";
+import { IDENTITY_ENTRY_TYPE, RECEIPT_ENTRY_TYPE, TransitClient } from "./index.js";
 
 const clients = [];
 const servers = [];
@@ -222,4 +222,49 @@ test("re-acks a receipt found on the resumed session branch without injecting it
 	const ack = await waitFor(() => agent.frames.find(frame => frame.t === "deliver_ack"), "resumed acknowledgement");
 	expect(sent).toEqual([]);
 	expect(ack.id).toBe("tx-received");
+});
+
+test("stores the identity token the daemon issues on the session branch", async () => {
+	const entries = [];
+	const { agent } = await connectClient({
+		pi: {
+			sendUserMessage: () => {},
+			appendEntry: (type, data) => {
+				entries.push([type, data]);
+			},
+		},
+	});
+	agent.send({
+		t: "registered",
+		agent: "omp-test",
+		address: "omp-test@titan",
+		generation: 1,
+		capability: "0123456789abcdef0123456789abcdef",
+		agent_token: "fedcba9876543210fedcba9876543210",
+	});
+
+	await waitFor(() => entries.length === 1, "identity entry write");
+	expect(entries).toEqual([[IDENTITY_ENTRY_TYPE, { token: "fedcba9876543210fedcba9876543210" }]]);
+});
+
+// The branch survives a `--resume`, the session id does not. Re-presenting the
+// token is what keeps a resumed agent at the same address.
+test("re-presents the identity token found on the resumed session branch", async () => {
+	const { register: frame } = await connectClient({
+		branch: [
+			{ type: "custom", customType: IDENTITY_ENTRY_TYPE, data: { token: "aaaabbbbccccddddeeeeffff00001111" } },
+			{ type: "custom", customType: IDENTITY_ENTRY_TYPE, data: { token: "1111000feeeeddddccccbbbbaaaa2222" } },
+		],
+	});
+
+	expect(frame.agent_token).toBe("1111000feeeeddddccccbbbbaaaa2222");
+});
+
+// A harness the extension has never heard of is the daemon's business, not
+// this constructor's: refusing here put the allowlist back one layer up.
+test("registers a harness the extension does not know", async () => {
+	const { agent, register: frame } = await connectClient({ harness: "acme-cli", withOmpTimers: false });
+
+	expect(frame.harness).toBe("acme-cli");
+	await register(agent);
 });

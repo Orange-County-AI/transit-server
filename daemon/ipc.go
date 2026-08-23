@@ -199,7 +199,7 @@ func (d *Daemon) statusResponse() map[string]any {
 		adapters = append(adapters, map[string]any{
 			"name": name, "harness": adapter.harness, "session_id": adapter.sessionID,
 			"pid": adapter.pid, "status": adapter.status, "named_by": adapter.namedBy,
-			"generation": adapter.generation,
+			"generation": adapter.generation, "anchor": adapter.anchor,
 		})
 	}
 	response := map[string]any{

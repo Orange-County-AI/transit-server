@@ -122,6 +122,12 @@ export class TransitOpenCodeClient {
 				proto: 1,
 				harness: "opencode",
 				session_id: this.#sessionId,
+				// No `agent_token`: OpenCode's session id is its own durable
+				// handle - reopening a session is how you get back to it - so
+				// the daemon's session anchor already recovers this identity.
+				// A stored token would have to be keyed by something that
+				// outlives the process, and the only such key here is that same
+				// session id, so it could not recover anything the id does not.
 				pid: process.pid,
 				cwd: this.#cwd,
 				title: this.#title,

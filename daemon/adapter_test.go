@@ -223,7 +223,7 @@ func TestAdapterRegistrationAdoptsHerdrPaneName(t *testing.T) {
 	if adapter.namedBy != "herdr" {
 		t.Fatalf("adapter named by = %q, want %q", adapter.namedBy, "herdr")
 	}
-	if record := d.nativeNames["omp:session-1"]; record.NamedBy != "herdr" {
+	if record := d.nativeNames["session:session-1"]; record.NamedBy != "herdr" {
 		t.Fatalf("stored named by = %q, want %q", record.NamedBy, "herdr")
 	}
 }
@@ -243,7 +243,7 @@ func TestAdapterRegistrationStoredNameWinsOverHerdrPane(t *testing.T) {
 	var prompts int
 	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)
 	setAdapterTestHerdrAgents(d, []HerdrAgent{{Name: "omp-pane", Kind: "omp", PaneID: "pane-1"}})
-	d.nativeNames["omp:session-1"] = nativeName{Name: "stored", NamedBy: "auto"}
+	d.nativeNames["session:session-1"] = nativeName{Name: "stored", NamedBy: "auto"}
 
 	adapter := registerAdapterDirect(t, d, agentFrame{Harness: "omp", SessionID: "session-1", PaneID: "pane-1"})
 	if adapter.name != "stored" || adapter.namedBy != "auto" {

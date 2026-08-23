@@ -62,12 +62,17 @@ type agentFrame struct {
 	Address    string `json:"address,omitempty"`
 	Generation uint64 `json:"generation,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// AgentToken is the opaque credential the daemon issued the last time this
+	// identity registered. A client that stores it and presents it again keeps
+	// its name across a session id change — which every OMP `--resume` is.
+	AgentToken string `json:"agent_token,omitempty"`
 }
 
 type nativeName struct {
 	Name       string `json:"name"`
 	NamedBy    string `json:"named_by"`
 	Generation uint64 `json:"generation"`
+	Token      string `json:"token,omitempty"`
 }
 
 type agentDeliveryOutcome struct {
@@ -89,6 +94,14 @@ type agentAdapter struct {
 	namedBy    string
 	generation uint64
 	capability string
+	// anchor records how this registration recovered its identity: a launcher
+	// declared `name`, a stored `token` outlived a session id, or nothing but
+	// the `session` id was on offer. Only the last is temporary, and an
+	// address that will not survive a restart should look temporary.
+	anchor string
+	// token is the credential handed back so the next registration can present
+	// it. Never logged and never put on the roster.
+	token      string
 	connection net.Conn
 
 	writeMu sync.Mutex
@@ -177,7 +190,7 @@ func (d *Daemon) serveAgentConnection(ctx context.Context, connection net.Conn) 
 	}
 	if err := adapter.write(agentFrame{
 		T: "registered", Agent: adapter.name, Address: adapter.name + "@" + d.cfg.Host,
-		Generation: adapter.generation, Capability: adapter.capability,
+		Generation: adapter.generation, Capability: adapter.capability, AgentToken: adapter.token,
 	}); err != nil {
 		d.deregisterAgentAdapter(adapter)
 		return
@@ -405,7 +418,11 @@ func (d *Daemon) claimNativeAdapterName(adapter *agentAdapter, name string) (add
 	adapter.name = name
 	adapter.namedBy = "user"
 	adapter.generation = generation
-	d.nativeNames[adapter.key] = nativeName{Name: name, NamedBy: "user", Generation: generation}
+	// The token is the identity, not the name: a claim renames the agent and
+	// must leave the credential that recovers it alone.
+	d.nativeNames[adapter.key] = nativeName{
+		Name: name, NamedBy: "user", Generation: generation, Token: previousRecord.Token,
+	}
 	if err := d.saveNativeNamesLocked(); err != nil {
 		adapter.name = previousName
 		adapter.namedBy = previousNamedBy
@@ -487,6 +504,24 @@ func (adapter *agentAdapter) failWaiters() {
 // checked now, so the value stays safe to print and to compare.
 var harnessPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
+// adapterKeyLocked resolves which identity a registration belongs to. Harness
+// is deliberately absent: it used to be half the key, so a client that
+// reported itself differently — or was simply wrong about what it was —
+// became a different agent. Session id is the last resort rather than the
+// rule, because OMP mints a fresh one on every `--resume`, which is why one
+// agent wore three addresses in a single afternoon.
+func (d *Daemon) adapterKeyLocked(frame agentFrame) (key, anchor string) {
+	if frame.Name != "" {
+		return "name:" + frame.Name, "name"
+	}
+	if frame.AgentToken != "" {
+		if stored, found := d.nativeTokens[frame.AgentToken]; found {
+			return stored, "token"
+		}
+	}
+	return "session:" + frame.SessionID, "session"
+}
+
 func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, connection net.Conn) (*agentAdapter, string, string) {
 	if !harnessPattern.MatchString(frame.Harness) {
 		return nil, "unsupported_harness", "harness must match [a-z][a-z0-9-]{0,31}"
@@ -494,21 +529,45 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	if strings.TrimSpace(frame.SessionID) == "" {
 		return nil, "invalid_session", "session_id is required"
 	}
-	key := frame.Harness + ":" + frame.SessionID
+	if frame.Name != "" && (!namePattern.MatchString(frame.Name) || reservedNames[frame.Name]) {
+		return nil, "invalid_name", "name is invalid or reserved"
+	}
 	paneAgent, hasPaneAgent := d.localAgentByPane(frame.PaneID)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	key, anchor := d.adapterKeyLocked(frame)
 	nameRecord, hasName := d.nativeNames[key]
+	// displaced are the adapters this registration takes over from: the same
+	// identity reconnecting, and — for a declared name — the older keys that
+	// held that name before the launcher started declaring it.
+	displaced := []*agentAdapter{}
+	if old := d.adapters[key]; old != nil {
+		displaced = append(displaced, old)
+	}
 	if frame.Name != "" {
-		if !namePattern.MatchString(frame.Name) || reservedNames[frame.Name] {
-			return nil, "invalid_name", "name is invalid or reserved"
-		}
+		// The declared name IS the identity, so a record holding it under some
+		// other key is a previous incarnation of this same agent: a session
+		// that has since been resumed, or a record written before the upgrade
+		// when the key was harness and session id. Absorb its generation and
+		// drop the stale key rather than refusing the launcher's own name.
 		for otherKey, other := range d.nativeNames {
-			if otherKey != key && other.Name == frame.Name {
-				return nil, "name_taken", "name is already claimed by another native session"
+			if otherKey == key || other.Name != frame.Name {
+				continue
 			}
+			if live := d.adapters[otherKey]; live != nil {
+				displaced = append(displaced, live)
+				delete(d.adapters, otherKey)
+			}
+			if other.Generation > nameRecord.Generation {
+				nameRecord.Generation = other.Generation
+			}
+			if nameRecord.Token == "" {
+				nameRecord.Token = other.Token
+			}
+			delete(d.nativeTokens, other.Token)
+			delete(d.nativeNames, otherKey)
 		}
 		nameRecord.Name = frame.Name
 		nameRecord.NamedBy = "user"
@@ -553,30 +612,49 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	if err != nil {
 		return nil, "capability_failed", err.Error()
 	}
+	if nameRecord.Token == "" {
+		token, err := randomCapability()
+		if err != nil {
+			return nil, "token_failed", err.Error()
+		}
+		nameRecord.Token = token
+	}
 	generation := nameRecord.Generation + 1
 	nameRecord.Generation = generation
-	old := d.adapters[key]
 	adapter := &agentAdapter{
 		key: key, harness: frame.Harness, sessionID: frame.SessionID, pid: pid, pidStart: start,
 		cwd: frame.CWD, title: frame.Title, status: frame.Status, name: nameRecord.Name, namedBy: nameRecord.NamedBy,
-		generation: generation, capability: capability, connection: connection, waiters: make(map[string]chan agentDeliveryOutcome),
+		generation: generation, capability: capability, anchor: anchor, token: nameRecord.Token,
+		connection: connection, waiters: make(map[string]chan agentDeliveryOutcome),
 	}
-	if d.nativeByName[nameRecord.Name] != nil && d.nativeByName[nameRecord.Name] != old {
+	if held := d.nativeByName[nameRecord.Name]; held != nil && !containsAdapter(displaced, held) {
 		return nil, "name_taken", "name is already registered by another native session"
 	}
 	d.nativeNames[key] = nameRecord
+	d.nativeTokens[nameRecord.Token] = key
 	if err := d.saveNativeNamesLocked(); err != nil {
 		return nil, "name_persistence_failed", err.Error()
 	}
 	d.adapters[key] = adapter
-	d.nativeByName[nameRecord.Name] = adapter
-	if old != nil && old.name != nameRecord.Name && d.nativeByName[old.name] == old {
-		delete(d.nativeByName, old.name)
+	for _, old := range displaced {
+		if old.name != nameRecord.Name && d.nativeByName[old.name] == old {
+			delete(d.nativeByName, old.name)
+		}
 	}
-	if old != nil {
+	d.nativeByName[nameRecord.Name] = adapter
+	for _, old := range displaced {
 		_ = old.connection.Close()
 	}
 	return adapter, "", ""
+}
+
+func containsAdapter(adapters []*agentAdapter, target *agentAdapter) bool {
+	for _, adapter := range adapters {
+		if adapter == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) deregisterAgentAdapter(adapter *agentAdapter) {

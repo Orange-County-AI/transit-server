@@ -216,7 +216,7 @@ func runStatus(args []string) error {
 	// count cannot: an agent present in the Herdr roster and absent here is one
 	// whose delivery falls back to typing into its pane.
 	for _, adapter := range adapterRows(response) {
-		fmt.Printf("adapter %s (%s, %s, pid %d)\n", adapter.Name, adapter.Harness, adapter.NamedBy, adapter.PID)
+		fmt.Printf("adapter %s (%s, %s, %s, pid %d)\n", adapter.Name, adapter.Harness, adapter.NamedBy, adapter.Anchor, adapter.PID)
 	}
 	for _, hold := range draftHoldRows(response) {
 		fmt.Printf("holding %s since %s\n", hold.PaneID, hold.At.Format(time.RFC3339))
@@ -246,7 +246,11 @@ type adapterRow struct {
 	Name    string `json:"name"`
 	Harness string `json:"harness"`
 	NamedBy string `json:"named_by"`
-	PID     int    `json:"pid"`
+	// Anchor says how the address is held: `name` and `token` survive a
+	// restart, `session` does not. An address that is about to change should
+	// not read the same as one that will not.
+	Anchor string `json:"anchor"`
+	PID    int    `json:"pid"`
 }
 
 func adapterRows(response map[string]any) []adapterRow {

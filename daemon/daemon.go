@@ -55,9 +55,12 @@ type Daemon struct {
 	adapters       map[string]*agentAdapter
 	nativeByName   map[string]*agentAdapter
 	nativeNames    map[string]nativeName
-	nextRPC        uint64
-	kickRoster     chan struct{}
-	kickOutbox     chan struct{}
+	// nativeTokens indexes the identity credentials by token so a client that
+	// re-presents one is recognised without scanning every record.
+	nativeTokens map[string]string
+	nextRPC      uint64
+	kickRoster   chan struct{}
+	kickOutbox   chan struct{}
 }
 
 func newDaemon(cfg *Config, token string, store *Store, herdr HerdrDriver) *Daemon {
@@ -71,6 +74,12 @@ func newDaemon(cfg *Config, token string, store *Store, herdr HerdrDriver) *Daem
 		kickOutbox: make(chan struct{}, 1),
 	}
 	d.nativeNames = d.loadNativeNames()
+	d.nativeTokens = make(map[string]string, len(d.nativeNames))
+	for key, record := range d.nativeNames {
+		if record.Token != "" {
+			d.nativeTokens[record.Token] = key
+		}
+	}
 	return d
 }
 
