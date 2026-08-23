@@ -1150,7 +1150,7 @@ app.get("/api/deliveries", async (context) => {
     `SELECT d.id, 'channel' AS kind, i.connector AS source, d.target_addr,
             d.status, d.attempts, d.read_at, d.settled_at, d.created_at,
             e.conversation_id, e.user, substr(e.content, 1, 240) AS preview,
-            r.posted_at, r.post_error
+            r.posted_at, r.post_error, d.via
      FROM integration_delivery d
      JOIN integration_event e ON e.id = d.event_id
      JOIN integration i ON i.id = e.integration_id

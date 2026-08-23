@@ -207,6 +207,13 @@ export const integrationDelivery = sqliteTable(
     attempts: integer("attempts").notNull().default(0),
     readAt: integer("read_at", { mode: "timestamp_ms" }),
     settledAt: integer("settled_at", { mode: "timestamp_ms" }),
+    // The transport that carried this channel delivery to its agent, written
+    // by the HostHub when the daemon acks. Same reasoning as
+    // message_delivery.via: a delivery that reached an agent by being typed
+    // into a pane and one that reached its adapter are indistinguishable
+    // otherwise, and a channel delivery is the case an operator is least able
+    // to observe directly.
+    via: text("via"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   },
   (table) => [

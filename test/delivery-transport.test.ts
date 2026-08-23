@@ -1,5 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { hmacSign } from "../src/lib/transit/crypto";
+import { signedIngestPayload } from "../src/lib/transit/ingest";
 
 const ORIGIN = "http://localhost";
 
@@ -171,5 +173,67 @@ describe("delivery transport reporting", () => {
     await expect
       .poll(() => deliveryRow(id, "legacy-agent@titan"))
       .toEqual({ status: "injected", via: null });
+  });
+
+  // A channel delivery is ledgered by the Integration DO, which never sees the
+  // wire ack, so its transport used to be recorded nowhere central at all —
+  // and an external integration is the case an operator is least able to
+  // observe directly.
+  it("records the transport of a channel delivery", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["alice"]);
+
+    const created = await SELF.fetch(`${ORIGIN}/api/sources`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: ORIGIN, cookie },
+      body: JSON.stringify({
+        source: "transport-source",
+        target_addr: "alice@titan",
+        reply_url_prefixes: ["https://receiver.example/transit/"],
+        instructions: "Report every alert.",
+      }),
+    });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const source = await created.json<{ secret: string }>();
+
+    const payload = JSON.stringify({
+      schema: "transit.ingest/1",
+      event_key: "transport-event",
+      conversation_id: "conversation-1",
+      user: "Build system",
+      content: "Build failed",
+    });
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = await hmacSign(
+      source.secret,
+      signedIngestPayload(timestamp, new TextEncoder().encode(payload)),
+    );
+    const ingested = await SELF.fetch(`${ORIGIN}/ingest/transport-source`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Transit-Timestamp": timestamp,
+        "Transit-Signature": `v1=${signature}`,
+      },
+      body: payload,
+    });
+    expect(ingested.status).toBe(202);
+    const { delivery_id: deliveryId } = await ingested.json<{ delivery_id: string }>();
+
+    expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+    frames.send({ t: "deliver_ack", id: deliveryId, agent: "alice", via: "adapter" });
+
+    await expect
+      .poll(() =>
+        env.DB.prepare("SELECT via FROM integration_delivery WHERE id = ?")
+          .bind(deliveryId)
+          .first<{ via: string | null }>(),
+      )
+      .toEqual({ via: "adapter" });
+
+    const response = await SELF.fetch(`${ORIGIN}/api/deliveries`, { headers: { cookie } });
+    const { deliveries } = await response.json<{ deliveries: Record<string, unknown>[] }>();
+    expect(deliveries.find((row) => row.id === deliveryId)).toMatchObject({ via: "adapter" });
   });
 });

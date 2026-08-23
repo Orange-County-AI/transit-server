@@ -970,6 +970,17 @@ export class HostHub extends DurableObject<Env> {
         .run(),
     );
     }
+    // A channel delivery is ledgered by the Integration DO, which never sees
+    // the wire ack and so cannot know the transport. Only the transport column
+    // is touched here, so the DO's own status machine is not raced.
+    if (messageId.startsWith("dlv_") && via) {
+      this.background(
+        "channel_delivery_via_write_failed",
+        this.env.DB.prepare("UPDATE integration_delivery SET via = ? WHERE id = ?")
+          .bind(via, messageId)
+          .run(),
+      );
+    }
     if (item.roomName && item.roomSeq !== undefined) {
       try {
         await this.env.ROOM.getByName(

@@ -1,0 +1,1 @@
+ALTER TABLE `integration_delivery` ADD `via` text;
