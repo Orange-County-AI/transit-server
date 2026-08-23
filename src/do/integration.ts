@@ -97,6 +97,9 @@ type DeliveryRecord = {
   // stronger fact than "typed into a pane" and the one that ends redelivery.
   injectedAt?: number;
   injectedVia?: string;
+  // Arrivals, not dispatches. The HostHub resolves each queued entry exactly
+  // once, so one report here is one envelope that reached an agent.
+  injections?: number;
   settledAt?: number;
   lastError?: string;
 };
@@ -464,13 +467,16 @@ export class Integration extends DurableObject<Env> {
   }
 
   /**
-   * The HostHub reports how a dispatched delivery actually reached its agent,
-   * taken from the daemon's wire ack. This object queues deliveries but never
-   * sees the socket that drains them, so this is the only way it can learn the
-   * difference between "sent to a host" and "sitting in an agent's session".
+   * The HostHub reports that a dispatched delivery reached its agent, and by
+   * which transport, taken from the daemon's wire ack. This object queues
+   * deliveries but never sees the socket that drains them, so this is the only
+   * way it can learn the difference between "sent to a host" and "sitting in
+   * an agent's session".
    *
-   * At-least-once acks make this idempotent by construction: a repeat of the
-   * transport we already recorded changes nothing.
+   * One call is one arrival. The HostHub resolves each queued entry exactly
+   * once — a repeat ack finds the entry already drained and never gets here —
+   * so this is the honest arrival count that `attempts` is not: a dispatch the
+   * host answers "duplicate" still counts an attempt and injects nothing.
    */
   async recordInjection(
     deliveryId: string,
@@ -482,13 +488,17 @@ export class Integration extends DurableObject<Env> {
     );
     if (!delivery || delivery.targetAddr !== targetAddr) return;
     if (delivery.settledAt !== undefined || delivery.status === "dead") return;
-    if (delivery.injectedVia === via) return;
+    delivery.injections = (delivery.injections ?? 0) + 1;
     delivery.injectedVia = via;
     delivery.injectedAt = Date.now();
     // Only suspension is applied here. Leaving a live schedule untouched keeps
     // an ack from silently postponing a retry that was already due.
     if (this.sessionHeld(delivery)) delivery.nextAttemptAt = undefined;
     await this.ctx.storage.put(`delivery:${deliveryId}`, delivery);
+    this.background(
+      "integration_injection_write_failed",
+      this.deliveryStatement(delivery).run(),
+    );
   }
 
   async markHandled(deliveryId: string, caller: string): Promise<{ duplicate: boolean }> {
@@ -1167,11 +1177,12 @@ export class Integration extends DurableObject<Env> {
   private deliveryStatement(delivery: DeliveryRecord): D1PreparedStatement {
     return this.env.DB.prepare(
       `INSERT INTO integration_delivery
-       (id, event_id, target_addr, status, attempts, read_at, settled_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       (id, event_id, target_addr, status, attempts, injections, read_at, settled_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          status = excluded.status,
          attempts = excluded.attempts,
+         injections = excluded.injections,
          read_at = excluded.read_at,
          settled_at = excluded.settled_at`,
     ).bind(
@@ -1180,6 +1191,7 @@ export class Integration extends DurableObject<Env> {
       delivery.targetAddr,
       delivery.status,
       delivery.attempts,
+      delivery.injections ?? 0,
       delivery.readAt ?? null,
       delivery.settledAt ?? null,
       delivery.createdAt,

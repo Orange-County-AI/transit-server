@@ -1148,7 +1148,8 @@ app.get("/api/deliveries", async (context) => {
   }
   const channel = await context.env.DB.prepare(
     `SELECT d.id, 'channel' AS kind, i.connector AS source, d.target_addr,
-            d.status, d.attempts, d.read_at, d.settled_at, d.created_at,
+            d.status, d.attempts, d.injections AS arrivals,
+            d.read_at, d.settled_at, d.created_at,
             e.conversation_id, e.user, substr(e.content, 1, 240) AS preview,
             r.posted_at, r.post_error, d.via
      FROM integration_delivery d
@@ -1175,6 +1176,11 @@ app.get("/api/deliveries", async (context) => {
               ELSE 'injected'
             END AS status,
             COALESCE(MAX(d.attempts), 0) AS attempts,
+            -- Arrivals, not sends. The queue re-sends an unacked entry, and
+            -- the daemon dedupes a tx_ id, so a message can be sent five
+            -- times and surface once. Count the recipients it actually
+            -- reached instead.
+            SUM(CASE WHEN d.status = 'injected' THEN 1 ELSE 0 END) AS arrivals,
             NULL AS read_at, NULL AS settled_at,
             m.created_at, m.id AS conversation_id, NULL AS user,
             substr(m.body, 1, 240) AS preview, NULL AS posted_at,

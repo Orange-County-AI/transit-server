@@ -200,6 +200,16 @@ async function storedDelivery(deliveryId: string): Promise<StoredDelivery> {
   return record!;
 }
 
+// Read from D1 rather than DO storage: the point of the counters is what an
+// operator can see.
+function deliveryCounts(deliveryId: string) {
+  return env.DB.prepare(
+    "SELECT attempts, injections FROM integration_delivery WHERE id = ?",
+  )
+    .bind(deliveryId)
+    .first<{ attempts: number; injections: number }>();
+}
+
 describe("delivery transport reporting", () => {
   // Both delivery paths acked identically, so the ledger could say a message
   // was injected but never which transport carried it. Answering that per
@@ -405,5 +415,46 @@ describe("channel redelivery", () => {
 
     const record = await storedDelivery(deliveryId);
     expect(record).toMatchObject({ nextAttemptAt: undefined, attempts: 1 });
+  });
+
+  // `attempts` counts dispatches. A dispatch the host answers "duplicate"
+  // injects nothing and still counts one, which is how a delivery that reached
+  // an agent three times got reported as 49. Arrivals are counted from acks,
+  // so the two must be able to disagree.
+  it("counts arrivals from acks, not dispatch attempts", async () => {
+    const { cookie } = await operator();
+    const credentials = await enroll(cookie, "titan");
+    const frames = await connect(credentials, ["dave"]);
+
+    const deliveryId = await ingestOne(cookie, "count-source", "dave@titan", "count-event");
+    expect(await frames.next()).toMatchObject({ t: "deliver", id: deliveryId });
+
+    // Never acked: the host keeps the entry queued, so every later dispatch is
+    // deduplicated. Attempts climb, arrivals stay at zero.
+    const stub = await integrationFor(deliveryId);
+    for (let round = 0; round < 3; round += 1) {
+      await runInDurableObject(stub, async (_instance, state) => {
+        const record = await state.storage.get<StoredDelivery>(`delivery:${deliveryId}`);
+        await state.storage.put(`delivery:${deliveryId}`, {
+          ...record,
+          nextAttemptAt: Date.now() - 1,
+        });
+      });
+      await runDurableObjectAlarm(stub);
+    }
+
+    const beforeAck = await deliveryCounts(deliveryId);
+    expect(beforeAck.attempts).toBeGreaterThan(1);
+    expect(beforeAck.injections).toBe(0);
+
+    frames.send({ t: "deliver_ack", id: deliveryId, agent: "dave", via: "adapter" });
+    await expect.poll(() => deliveryCounts(deliveryId)).toMatchObject({ injections: 1 });
+
+    // And the operator surface reports the two separately.
+    const response = await SELF.fetch(`${ORIGIN}/api/deliveries`, { headers: { cookie } });
+    const { deliveries } = await response.json<{ deliveries: Record<string, unknown>[] }>();
+    const row = deliveries.find((entry) => entry.id === deliveryId)!;
+    expect(row.arrivals).toBe(1);
+    expect(Number(row.attempts)).toBeGreaterThan(1);
   });
 });

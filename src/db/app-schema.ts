@@ -205,6 +205,12 @@ export const integrationDelivery = sqliteTable(
       .notNull()
       .default("pending"),
     attempts: integer("attempts").notNull().default(0),
+    // Times this delivery actually reached an agent, counted from the daemon's
+    // ack. `attempts` counts dispatches, and a dispatch the host answers
+    // "duplicate" injects nothing — so reading `attempts` as arrivals
+    // overstates them, which is exactly how a 3-arrival delivery got reported
+    // as 49.
+    injections: integer("injections").notNull().default(0),
     readAt: integer("read_at", { mode: "timestamp_ms" }),
     settledAt: integer("settled_at", { mode: "timestamp_ms" }),
     // The transport that carried this channel delivery to its agent, written
