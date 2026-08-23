@@ -34,6 +34,12 @@ title = "Transit inbox"
 contexts = ["workspace"]
 command = ["sh", "-c", "\"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin ocai.transit --entrypoint inbox --placement popup"]
 
+[[actions]]
+id = "open-dashboard"
+title = "Open Transit dashboard"
+contexts = ["workspace"]
+command = ["sh", "-c", "open https://transit.orangecountyai.com/overview 2>/dev/null || xdg-open https://transit.orangecountyai.com/overview"]
+
 
 [[actions]]
 id = "toggle-pause"
