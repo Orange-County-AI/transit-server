@@ -101,7 +101,9 @@ describe("Integration engine", () => {
     const beforeRead = Date.now();
     const full = await integration.readMessage(ingested.deliveryId, "alice@alpha");
     expect(full).toContain('read="first" schema="transit/1"');
-    expect(full).toContain("need answer\n[settle: chat_reply or mark_handled]\nReply visibly.");
+    expect(full).toContain(
+      'need answer\n<settle tool="chat_reply|mark_handled"/>\nReply visibly.',
+    );
     const readDelivery = await runInDurableObject(
       integration,
       async (_instance, state) =>

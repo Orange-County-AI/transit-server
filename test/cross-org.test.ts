@@ -253,7 +253,7 @@ describe("cross-organization direct messages", () => {
       `<transit from="${aliceAddress}" id="tx_100000000002"`,
     );
     expect(String(bobDelivery.envelope)).toContain(
-      `[reply: send_message to="${aliceAddress}" reply_to="tx_100000000002"]`,
+      `<reply tool="send_message" to="${aliceAddress}" reply_to="tx_100000000002"/>`,
     );
     bob.send(
       JSON.stringify({

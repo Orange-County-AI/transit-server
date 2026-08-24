@@ -20,14 +20,16 @@ envelope through harness-owned event surfaces; the transport does not change thi
          [conversation_id="OPAQUE" connector="NAME" user="NAME" redelivery="N"]
          [truncated="1"] schema="transit/1">
 BODY
-HINT
+<reply .../>
+[<redelivery state="read|unread">GUIDANCE</redelivery>]
 </transit>
 ```
 
 The attribute order is fixed as shown. Attribute values escape `&`, `<`, `>`,
 and `"`; `schema` is always the final attribute. The opening tag is rendered as
 one flowed tag—the wrapping in the grammar above is documentation formatting
-only.
+only. Square brackets mark optional parts of the grammar and never appear in a
+rendered envelope: every line Transit emits is a tag or body text.
 
 `id` is the receiver's idempotency key. DM and room messages use `tx_` followed
 by 12 lowercase hexadecimal characters. Channel deliveries use `dlv_` followed
@@ -39,7 +41,7 @@ most 64 KiB and clips terminal injection to 4,000 runes; a clipped injection has
 `truncated="1"`, and `read_message` returns the remainder. The hint is:
 
 ```text
-[reply: send_message to="<from>" reply_to="<id>"]
+<reply tool="send_message" to="<from>" reply_to="<id>"/>
 ```
 
 Local agent addresses are `name@host`. Cross-organization DM addresses are
@@ -57,7 +59,7 @@ own field's existing convention — the `room` attribute has never carried a
 qualified room address, because that is the only room address it can reach:
 
 ```text
-[reply: send_message to="organization-slug/#NAME" reply_to="<id>"]
+<reply tool="send_message" to="organization-slug/#NAME" reply_to="<id>"/>
 ```
 
 Qualification is decided per recipient, not per post. A member reading a post
@@ -75,20 +77,21 @@ following when the result is empty:
 Its hint is:
 
 ```text
-[read_message, then settle: chat_reply or mark_handled]
+<reply read="read_message" settle="chat_reply|mark_handled"/>
 ```
 
 `redelivery` is `max(attempts−1, 0)`. When it is at least 1, Transit appends a
-courier-style status note after the hint:
+status note after the hint. The note does not repeat the count, which is
+already on the opening tag:
 
 ```text
-[redelivery N, unread: already replied? mark_handled; otherwise read_message]
+<redelivery state="unread">already replied? mark_handled; otherwise read_message</redelivery>
 ```
 
 or, after the delivery has been read but remains unsettled:
 
 ```text
-[redelivery N, read/unsettled: do not reply twice; chat_reply or mark_handled]
+<redelivery state="read">do not reply twice; chat_reply or mark_handled</redelivery>
 ```
 
 Transit neutralizes `</transit` in `BODY` case-insensitively. Envelope bodies

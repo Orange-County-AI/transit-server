@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +11,12 @@ import (
 const maxBodyRunes = 4000
 const maxPreviewRunes = 100
 const maxUserRunes = 64
+
+const channelHint = `<reply read="read_message" settle="chat_reply|mark_handled"/>`
+const fullSettleHint = `<settle tool="chat_reply|mark_handled"/>`
+const fullSettledHint = `<settle state="done"/>`
+const redeliveryRead = "do not reply twice; chat_reply or mark_handled"
+const redeliveryUnread = "already replied? mark_handled; otherwise read_message"
 
 var attributeReplacer = strings.NewReplacer(
 	"&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;",
@@ -69,7 +74,7 @@ func channelPreview(value string) string {
 	return preview
 }
 
-func renderOpeningTag(name string, attributes []envelopeAttribute) string {
+func renderTag(name string, attributes []envelopeAttribute, closing string) string {
 	var out strings.Builder
 	out.WriteByte('<')
 	out.WriteString(name)
@@ -80,8 +85,16 @@ func renderOpeningTag(name string, attributes []envelopeAttribute) string {
 		out.WriteString(attributeReplacer.Replace(attribute.value))
 		out.WriteByte('"')
 	}
-	out.WriteByte('>')
+	out.WriteString(closing)
 	return out.String()
+}
+
+func renderOpeningTag(name string, attributes []envelopeAttribute) string {
+	return renderTag(name, attributes, ">")
+}
+
+func renderSelfClosingTag(name string, attributes []envelopeAttribute) string {
+	return renderTag(name, attributes, "/>")
 }
 
 func RenderEnvelope(input EnvelopeInput) string {
@@ -117,12 +130,12 @@ func RenderEnvelope(input EnvelopeInput) string {
 			attributes = append(attributes, envelopeAttribute{"trigger", input.Trigger})
 		}
 		body = channelPreview(input.Body)
-		hint = "[read_message, then settle: chat_reply or mark_handled]"
+		hint = channelHint
 		if input.Redelivery > 0 {
 			if input.Read {
-				status = fmt.Sprintf("[redelivery %d, read/unsettled: do not reply twice; chat_reply or mark_handled]", input.Redelivery)
+				status = `<redelivery state="read">` + redeliveryRead + `</redelivery>`
 			} else {
-				status = fmt.Sprintf("[redelivery %d, unread: already replied? mark_handled; otherwise read_message]", input.Redelivery)
+				status = `<redelivery state="unread">` + redeliveryUnread + `</redelivery>`
 			}
 		}
 	} else {
@@ -136,7 +149,9 @@ func RenderEnvelope(input EnvelopeInput) string {
 		if input.ReplyTarget != "" {
 			target = input.ReplyTarget
 		}
-		hint = fmt.Sprintf("[reply: send_message to=\"%s\" reply_to=\"%s\"]", target, input.ID)
+		hint = renderSelfClosingTag("reply", []envelopeAttribute{
+			{"tool", "send_message"}, {"to", target}, {"reply_to", input.ID},
+		})
 	}
 	attributes = append(attributes, envelopeAttribute{"schema", "transit/1"})
 	lines := []string{renderOpeningTag("transit", attributes), body, hint}
@@ -159,9 +174,9 @@ func RenderFull(input FullEnvelopeInput) string {
 		{"id", input.ID}, {"conversation_id", input.ConversationID}, {"user", user},
 		{"connector", input.Connector}, {"status", input.Status}, {"read", read}, {"schema", "transit/1"},
 	}
-	footer := "[settle: chat_reply or mark_handled]"
+	footer := fullSettleHint
 	if input.Settled {
-		footer = "[already settled; history only]"
+		footer = fullSettledHint
 	}
 	lines := []string{renderOpeningTag("transit_full", attributes), input.Body, footer}
 	if input.Instructions != "" {

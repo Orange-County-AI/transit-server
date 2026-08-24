@@ -529,7 +529,8 @@ describe("channel redelivery", () => {
     const retry = await frames.next();
     expect(retry).toMatchObject({ t: "deliver", id: deliveryId });
     expect(String(retry.envelope)).toContain('redelivery="1"');
-    // The banner is what the agent reads, so it has to move with the count.
-    expect(String(retry.envelope)).toContain("[redelivery 1");
+    // The count now lives only on the tag, so the banner is a separate fact:
+    // the attribute can be right while the note is omitted entirely.
+    expect(String(retry.envelope)).toContain('<redelivery state="unread">');
   });
 });

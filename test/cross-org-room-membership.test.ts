@@ -182,7 +182,7 @@ describe("cross-organization Room membership", () => {
     const deliveredHome = await homeDelivery;
     expect(String(deliveredHome.envelope)).toContain('from="alice@alpha"');
     expect(String(deliveredHome.envelope)).toContain('room="ops"');
-    expect(String(deliveredHome.envelope)).toContain('[reply: send_message to="alice@alpha"');
+    expect(String(deliveredHome.envelope)).toContain('<reply tool="send_message" to="alice@alpha"');
     await expect.poll(async () => (await foreignHub.status()).queueDepth).toBe(1);
     expect((await roomHub.status()).queueDepth).toBe(0);
 
@@ -191,7 +191,7 @@ describe("cross-organization Room membership", () => {
     expect(String(deliveredForeign.envelope)).toContain(`from="${home.orgSlug}/alice@alpha"`);
     expect(String(deliveredForeign.envelope)).toContain(`room="${home.orgSlug}/ops"`);
     expect(String(deliveredForeign.envelope)).toContain(
-      `[reply: send_message to="${home.orgSlug}/#ops"`,
+      `<reply tool="send_message" to="${home.orgSlug}/#ops"`,
     );
 
     expect((await api(`/api/organization-connections/${connection.id}`, {

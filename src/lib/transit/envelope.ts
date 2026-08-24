@@ -2,9 +2,11 @@ const MAX_BODY_RUNES = 4_000;
 const MAX_PREVIEW_RUNES = 100;
 const MAX_USER_RUNES = 64;
 const EMPTY_PREVIEW = "(no text — attachments or an empty body)";
-const CHANNEL_HINT = "[read_message, then settle: chat_reply or mark_handled]";
-const FULL_SETTLE_HINT = "[settle: chat_reply or mark_handled]";
-const FULL_SETTLED_HINT = "[already settled; history only]";
+const CHANNEL_HINT = '<reply read="read_message" settle="chat_reply|mark_handled"/>';
+const FULL_SETTLE_HINT = '<settle tool="chat_reply|mark_handled"/>';
+const FULL_SETTLED_HINT = '<settle state="done"/>';
+const REDELIVERY_READ = "do not reply twice; chat_reply or mark_handled";
+const REDELIVERY_UNREAD = "already replied? mark_handled; otherwise read_message";
 
 export type DirectEnvelope = {
   from: string;
@@ -80,11 +82,18 @@ function channelPreview(value: string): string {
   return clipRunes(flattened, MAX_PREVIEW_RUNES).value;
 }
 
-function openingTag(attributes: [string, string][]): string {
-  const rendered = attributes
+function renderAttributes(attributes: [string, string][]): string {
+  return attributes
     .map(([name, value]) => `${name}="${escapeAttribute(value)}"`)
     .join(" ");
-  return `<transit ${rendered}>`;
+}
+
+function openingTag(attributes: [string, string][]): string {
+  return `<transit ${renderAttributes(attributes)}>`;
+}
+
+function selfClosing(name: string, attributes: [string, string][]): string {
+  return `<${name} ${renderAttributes(attributes)}/>`;
 }
 
 export function renderEnvelope(message: EnvelopeMessage): string {
@@ -119,13 +128,17 @@ export function renderEnvelope(message: EnvelopeMessage): string {
     hint = CHANNEL_HINT;
     if (redelivery > 0) {
       statusNote = message.read
-        ? `[redelivery ${redelivery}, read/unsettled: do not reply twice; chat_reply or mark_handled]`
-        : `[redelivery ${redelivery}, unread: already replied? mark_handled; otherwise read_message]`;
+        ? `<redelivery state="read">${REDELIVERY_READ}</redelivery>`
+        : `<redelivery state="unread">${REDELIVERY_UNREAD}</redelivery>`;
     }
   } else {
     const clipped = clipRunes(neutralizeBody(message.body), MAX_BODY_RUNES);
     body = clipped.value;
-    hint = `[reply: send_message to="${message.replyTarget ?? message.from}" reply_to="${message.id}"]`;
+    hint = selfClosing("reply", [
+      ["tool", "send_message"],
+      ["to", message.replyTarget ?? message.from],
+      ["reply_to", message.id],
+    ]);
     if (clipped.clipped) attributes.push(["truncated", "1"]);
   }
 
@@ -146,9 +159,11 @@ export function renderFull(message: FullEnvelopeMessage): string {
     ["schema", "transit/1"],
   ];
   const footer = message.settled ? FULL_SETTLED_HINT : FULL_SETTLE_HINT;
-  const lines = [`<transit_full ${attributes
-    .map(([name, value]) => `${name}="${escapeAttribute(value)}"`)
-    .join(" ")}>`, message.body, footer];
+  const lines = [
+    `<transit_full ${renderAttributes(attributes)}>`,
+    message.body,
+    footer,
+  ];
   if (message.instructions) lines.push(message.instructions);
   lines.push("</transit_full>");
   return lines.join("\n");
