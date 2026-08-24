@@ -6,7 +6,6 @@ import { createRoom } from "../lib/transit/rooms";
 import {
   AddressError,
   formatAgentAddress,
-  formatRoomAddress,
   parseAddress,
   parseRoomTarget,
 } from "../lib/transit/addr";
@@ -31,6 +30,11 @@ import {
   organizationConnectionIsActive,
   resolveConnectedOrganization,
 } from "../lib/transit/organizations";
+import {
+  integrationForDelivery,
+  listAgents,
+  listRooms,
+} from "../services/directory";
 
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_DELIVERY_ATTEMPTS = 40;
@@ -128,6 +132,23 @@ export type SendOutcome = { status: "ack" } | { status: "nak"; code: SendNakCode
  * site, and the failure reads as a missing property rather than as this.
  */
 export type RpcOutcome = { ok: true; json: string } | { ok: false; error: string };
+
+/**
+ * Where a queued delivery goes when it leaves this hub.
+ *
+ * Today there is exactly one sink and it is the daemon socket, so this is a
+ * name rather than a choice. It exists as a name because "queue it, then write
+ * it to a socket" was one indivisible step, and that made the socket the only
+ * thing a delivery could ever mean. A participant with no daemon - an MCP-only
+ * agent, or a human - needs a sink that stores and is read back instead, and
+ * `hold until a socket exists` must not stay the only answer this hub can give.
+ *
+ * `accepts` decides whether an entry can move at all; `deliver` moves it.
+ */
+type DeliverySink = {
+  accepts(agent: string): Promise<boolean>;
+  deliver(item: QueuedDelivery, envelope: string): void;
+};
 
 type ActivityEvent = {
   type: string;
@@ -920,6 +941,28 @@ export class HostHub extends DurableObject<Env> {
     );
   }
 
+  /**
+   * The sink this hub can drain into right now, or null when it has none. See
+   * {@link DeliverySink}.
+   */
+  private deliverySink(): DeliverySink | null {
+    const socket = this.daemonSocket();
+    if (!socket) return null;
+    return {
+      // A daemon delivers to the agents it published, so its roster is what
+      // says whether this entry has anywhere to land.
+      accepts: (agent) => this.hasAgent(agent),
+      deliver: (item, envelope) => {
+        this.sendFrame(socket, {
+          t: "deliver",
+          id: item.messageId,
+          agent: item.agent,
+          envelope,
+        });
+      },
+    };
+  }
+
   private async dispatchQueued(): Promise<void> {
     const queue = await this.ctx.storage.list<QueuedDelivery>({
       prefix: "q:",
@@ -927,7 +970,7 @@ export class HostHub extends DurableObject<Env> {
     });
     if (queue.size === 0) return;
 
-    const socket = this.daemonSocket();
+    const sink = this.deliverySink();
     const now = Date.now();
     let nextAlarm: number | null = null;
     for (const [key, item] of queue) {
@@ -944,7 +987,7 @@ export class HostHub extends DurableObject<Env> {
         continue;
       }
 
-      if (!socket || !(await this.hasAgent(item.agent))) {
+      if (!sink || !(await sink.accepts(item.agent))) {
         const expiresAt = item.enqueuedAt + DELIVERY_TTL_MS;
         nextAlarm = nextAlarm === null ? expiresAt : Math.min(nextAlarm, expiresAt);
         continue;
@@ -984,12 +1027,7 @@ export class HostHub extends DurableObject<Env> {
           })
         : item.envelope;
       try {
-        this.sendFrame(socket, {
-          t: "deliver",
-          id: item.messageId,
-          agent: item.agent,
-          envelope,
-        });
+        sink.deliver(item, envelope);
       } catch (error) {
         attempted.lastError = error instanceof Error ? error.message : String(error);
         await this.ctx.storage.put(key, attempted);
@@ -1262,17 +1300,12 @@ export class HostHub extends DurableObject<Env> {
     org: string,
     deliveryId: string,
   ): Promise<string> {
-    const row = await this.env.DB.prepare(
-      `SELECT e.integration_id
-       FROM integration_delivery d
-       JOIN integration_event e ON e.id = d.event_id
-       JOIN integration i ON i.id = e.integration_id
-       WHERE d.id = ? AND i.org_id = ? LIMIT 1`,
-    )
-      .bind(deliveryId, org)
-      .first<{ integration_id: string }>();
-    if (!row) throw new Error("delivery not found");
-    return row.integration_id;
+    const integrationId = await integrationForDelivery(this.env.DB, {
+      org,
+      deliveryId,
+    });
+    if (!integrationId) throw new Error("delivery not found");
+    return integrationId;
   }
 
   private async reportInjection(
@@ -1395,99 +1428,18 @@ export class HostHub extends DurableObject<Env> {
           `org:${identity.org}:integration:${integrationId}`,
         ).markHandled(params.delivery_id, caller);
       } else if (method === "list_agents") {
-        const hostFilter = typeof params.host === "string" ? params.host : null;
-        const requestedOrganization =
-          typeof params.organization === "string" && params.organization
-            ? params.organization
-            : null;
-        let rosterOrg = identity.org;
-        let addressOrganization: string | null = null;
-        if (requestedOrganization) {
-          const connected = await resolveConnectedOrganization(
-            this.env.DB,
-            identity.org,
-            requestedOrganization,
-          );
-          if (!connected) throw new Error("organization is not connected");
-          rosterOrg = connected.targetOrgId;
-          addressOrganization = connected.targetSlug;
-        }
-        const query = hostFilter
-          ? this.env.DB.prepare(
-              `SELECT a.name, a.kind, a.pane_id, a.status, a.named_by, a.title, a.cwd,
-                      h.slug AS host, a.updated_at
-               FROM agent_snapshot a JOIN host h ON h.id = a.host_id
-               WHERE h.org_id = ? AND h.slug = ? AND h.revoked_at IS NULL
-               ORDER BY h.slug, a.name`,
-            ).bind(rosterOrg, hostFilter)
-          : this.env.DB.prepare(
-              `SELECT a.name, a.kind, a.pane_id, a.status, a.named_by, a.title, a.cwd,
-                      h.slug AS host, a.updated_at
-               FROM agent_snapshot a JOIN host h ON h.id = a.host_id
-               WHERE h.org_id = ? AND h.revoked_at IS NULL
-               ORDER BY h.slug, a.name`,
-            ).bind(rosterOrg);
-        const agents = (
-          await query.all<{
-            name: string;
-            kind: string;
-            pane_id: string;
-            status: string;
-            named_by: "user" | "auto";
-            title: string;
-            cwd: string;
-            host: string;
-            updated_at: number;
-          }>()
-        ).results;
-        result = addressOrganization
-          ? agents.map((agent) => ({
-              ...agent,
-              organization: addressOrganization,
-              address: formatAgentAddress(
-                agent.name,
-                agent.host,
-                addressOrganization,
-              ),
-            }))
-          : agents;
+        result = await listAgents(this.env.DB, {
+          org: identity.org,
+          host: typeof params.host === "string" ? params.host : null,
+          organization:
+            typeof params.organization === "string" ? params.organization : null,
+        });
       } else if (method === "list_rooms") {
-        const requestedOrganization =
-          typeof params.organization === "string" && params.organization
-            ? params.organization
-            : null;
-        let roomOrg = identity.org;
-        let addressOrganization: string | null = null;
-        if (requestedOrganization) {
-          const connected = await resolveConnectedOrganization(
-            this.env.DB,
-            identity.org,
-            requestedOrganization,
-          );
-          if (!connected) throw new Error("organization is not connected");
-          roomOrg = connected.targetOrgId;
-          addressOrganization = connected.targetSlug;
-        }
-        // room_member.org_id is the room owner's organization, not the member's.
-        const rooms = (
-          await this.env.DB.prepare(
-            `SELECT r.name, r.policy, r.created_at, COUNT(m.address) AS members
-             FROM room r LEFT JOIN room_member m
-               ON m.org_id = r.org_id AND m.room = r.name
-             WHERE r.org_id = ?
-             GROUP BY r.org_id, r.name
-             ORDER BY r.name`,
-          )
-            .bind(roomOrg)
-            .all<{ name: string; policy: string; created_at: number; members: number }>()
-        ).results;
-        result = addressOrganization
-          ? rooms.map((room) => ({
-              ...room,
-              organization: addressOrganization,
-              address: `${addressOrganization}/${formatRoomAddress(room.name)}`,
-            }))
-          : rooms;
+        result = await listRooms(this.env.DB, {
+          org: identity.org,
+          organization:
+            typeof params.organization === "string" ? params.organization : null,
+        });
       } else if (
         method === "create_room" ||
         method === "join_room" ||

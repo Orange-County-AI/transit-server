@@ -21,7 +21,6 @@ import { type AuthPluginFactory, auth, noAuthPlugins } from "./lib/better-auth";
 
 import {
   AddressError,
-  formatAgentAddress,
   parseAddress,
   validateHost,
   validateName,
@@ -49,6 +48,13 @@ import {
   resolveConnectedOrganization,
 } from "./lib/transit/organizations";
 import { handleMcp } from "./mcp/http";
+import {
+  agentExists,
+  integrationForDelivery,
+  listAgents,
+  listRooms,
+} from "./services/directory";
+import { ServiceError } from "./services/errors";
 import { HostHub } from "./do/host-hub";
 import { Room } from "./do/room";
 import { Integration } from "./do/integration";
@@ -278,16 +284,11 @@ async function targetExists(
     );
   }
   if (parsed.organization) return false;
-  return Boolean(
-    await context.env.DB.prepare(
-      `SELECT 1 AS present
-       FROM agent_snapshot a JOIN host h ON h.id = a.host_id
-       WHERE h.org_id = ? AND h.slug = ? AND a.name = ? AND h.revoked_at IS NULL
-       LIMIT 1`,
-    )
-      .bind(org, parsed.host, parsed.name)
-      .first(),
-  );
+  return agentExists(context.env.DB, {
+    org,
+    host: parsed.host,
+    name: parsed.name,
+  });
 }
 
 app.get("/SKILL.md", () => {
@@ -722,7 +723,6 @@ app.get("/api/agents", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
   const hostFilter = context.req.query("host");
-  const requestedOrganization = context.req.query("organization");
   if (hostFilter) {
     try {
       validateHost(hostFilter);
@@ -730,45 +730,18 @@ app.get("/api/agents", async (context) => {
       return context.json({ error: "invalid_host" }, 400);
     }
   }
-
-  let rosterOrg = org;
-  let addressOrganization: string | null = null;
-  if (requestedOrganization) {
-    const connected = await resolveConnectedOrganization(
-      context.env.DB,
-      org,
-      requestedOrganization,
-    );
-    if (!connected) return context.json({ error: "organization_not_connected" }, 409);
-    rosterOrg = connected.targetOrgId;
-    addressOrganization = connected.targetSlug;
+  try {
+    return context.json({
+      agents: await listAgents(context.env.DB, {
+        org,
+        host: hostFilter ?? null,
+        organization: context.req.query("organization") ?? null,
+      }),
+    });
+  } catch (error) {
+    if (error instanceof ServiceError) return context.json({ error: error.code }, 409);
+    throw error;
   }
-
-  const statement = hostFilter
-    ? context.env.DB.prepare(
-        `SELECT a.name, a.kind, a.pane_id, a.status, a.named_by, a.title, a.cwd,
-                a.updated_at, h.slug AS host
-         FROM agent_snapshot a JOIN host h ON h.id = a.host_id
-         WHERE h.org_id = ? AND h.slug = ? AND h.revoked_at IS NULL
-         ORDER BY a.name`,
-      ).bind(rosterOrg, hostFilter)
-    : context.env.DB.prepare(
-        `SELECT a.name, a.kind, a.pane_id, a.status, a.named_by, a.title, a.cwd,
-                a.updated_at, h.slug AS host
-         FROM agent_snapshot a JOIN host h ON h.id = a.host_id
-         WHERE h.org_id = ? AND h.revoked_at IS NULL
-         ORDER BY h.slug, a.name`,
-      ).bind(rosterOrg);
-  const agents = (await statement.all<{ name: string; host: string }>()).results;
-  return context.json({
-    agents: addressOrganization
-      ? agents.map((agent) => ({
-          ...agent,
-          organization: addressOrganization,
-          address: formatAgentAddress(agent.name, agent.host, addressOrganization),
-        }))
-      : agents,
-  });
 });
 
 app.get("/api/activity", async (context) => {
@@ -832,23 +805,12 @@ app.get("/api/activity", async (context) => {
 app.get("/api/rooms", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
-  const since = Date.now() - 24 * 60 * 60_000;
-  const rooms = await context.env.DB.prepare(
-    `SELECT r.name, r.policy, r.created_at,
-            COUNT(DISTINCT rm.address) AS members,
-            COUNT(DISTINCT CASE WHEN msg.created_at >= ? THEN msg.id END) AS messages_24h
-     FROM room r
-     LEFT JOIN room_member rm
-       ON rm.org_id = r.org_id /* deliberate: room owner organization */ AND rm.room = r.name
-     LEFT JOIN message msg
-       ON msg.org_id = r.org_id AND msg.to_addr = '#' || r.name AND msg.kind = 'room'
-     WHERE r.org_id = ?
-     GROUP BY r.org_id, r.name
-     ORDER BY r.name`,
-  )
-    .bind(since, org)
-    .all();
-  return context.json({ rooms: rooms.results });
+  return context.json({
+    rooms: await listRooms(context.env.DB, {
+      org,
+      activityWindowMs: 24 * 60 * 60_000,
+    }),
+  });
 });
 
 app.post("/api/rooms", async (context) => {
@@ -917,15 +879,15 @@ app.post("/api/rooms/:name/members", async (context) => {
     return context.json({ error: "organization_not_connected" }, 409);
   }
   const memberOrg = connected?.targetOrgId ?? org;
-  const agent = await context.env.DB.prepare(
-    `SELECT 1 AS present
-     FROM agent_snapshot a JOIN host h ON h.id = a.host_id
-     WHERE h.org_id = ? AND h.slug = ? AND a.name = ? AND h.revoked_at IS NULL
-     LIMIT 1`,
-  )
-    .bind(memberOrg, address.host, address.name)
-    .first();
-  if (!agent) return context.json({ error: "agent_not_found" }, 404);
+  if (
+    !(await agentExists(context.env.DB, {
+      org: memberOrg,
+      host: address.host,
+      name: address.name,
+    }))
+  ) {
+    return context.json({ error: "agent_not_found" }, 404);
+  }
   try {
     const result = await context.env.ROOM.getByName(
       `org:${org}:room:${name}`,
@@ -1352,18 +1314,13 @@ app.post("/api/deliveries/:id/requeue", async (context) => {
 app.post("/api/deliveries/:id/handle", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
-  const row = await context.env.DB.prepare(
-    `SELECT e.integration_id
-     FROM integration_delivery d
-     JOIN integration_event e ON e.id = d.event_id
-     JOIN integration i ON i.id = e.integration_id
-     WHERE d.id = ? AND i.org_id = ? LIMIT 1`,
-  )
-    .bind(context.req.param("id"), org)
-    .first<{ integration_id: string }>();
-  if (!row) return context.json({ error: "delivery_not_found" }, 404);
+  const integrationId = await integrationForDelivery(context.env.DB, {
+    org,
+    deliveryId: context.req.param("id"),
+  });
+  if (!integrationId) return context.json({ error: "delivery_not_found" }, 404);
   const result = await context.env.INTEGRATION.getByName(
-    `org:${org}:integration:${row.integration_id}`,
+    `org:${org}:integration:${integrationId}`,
   ).operatorMarkHandled(context.req.param("id"));
   return context.json(result);
 });
