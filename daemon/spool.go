@@ -423,18 +423,41 @@ func (s *Store) ListDead() ([]DeadMessage, error) {
 		}
 		return nil, err
 	}
+	// One unreadable file must not cost the operator the whole listing. This is
+	// the surface whose entire job is making a silent failure visible, so an
+	// entry that cannot be parsed is reported as itself and the rest still
+	// print. Structural strictness here would reproduce the bug it exists to
+	// expose.
 	dead := make([]DeadMessage, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(s.root, "dead", entry.Name()))
+		name := entry.Name()
+		id := strings.TrimSuffix(name, ".json")
+		unreadable := func(reason string) DeadMessage {
+			at := time.Time{}
+			if info, statErr := entry.Info(); statErr == nil {
+				at = info.ModTime()
+			}
+			return DeadMessage{
+				// TS carries the file's mtime because that is the only honest
+				// timestamp available for a record whose body cannot be read,
+				// and it is what the listing prints.
+				Message: &OutboxMessage{ID: id, To: "unknown", TS: at},
+				Reason:  "unreadable: " + reason,
+				At:      at,
+			}
+		}
+		data, err := os.ReadFile(filepath.Join(s.root, "dead", name))
 		if err != nil {
-			return nil, err
+			dead = append(dead, unreadable(err.Error()))
+			continue
 		}
 		var item DeadMessage
 		if err := json.Unmarshal(data, &item); err != nil {
-			return nil, err
+			dead = append(dead, unreadable(err.Error()))
+			continue
 		}
 		dead = append(dead, item)
 	}

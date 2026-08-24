@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -316,6 +317,26 @@ func runInbox(args []string) error {
 		outbox, _ := response["outbox"].([]any)
 		dead, _ := response["dead"].([]any)
 		fmt.Printf("TRANSIT INBOX\n\nOUTBOX  %d\nDEAD    %d\n", len(outbox), len(dead))
+		// A count on its own cannot be acted on, and a dead letter is the one
+		// spool entry nobody is ever told about: the send failed, the sender
+		// moved on, and the intended recipient never knew it was tried. So the
+		// entries are printed, not just tallied.
+		for _, row := range spoolRows(response, "outbox") {
+			fmt.Printf("\nOUTBOX  %s -> %s  %s\n  %s\n",
+				row.ID, row.To, row.TS.Format(time.RFC3339), previewLine(row.Body))
+		}
+		for _, row := range deadRows(response) {
+			reason := row.Reason
+			if reason == "" {
+				reason = "unrecorded"
+			}
+			to, id, body, ts := "unknown", "", "", row.At
+			if row.Message != nil {
+				to, id, body, ts = row.Message.To, row.Message.ID, row.Message.Body, row.Message.TS
+			}
+			fmt.Printf("\nDEAD    %s -> %s  %s  (%s)\n  %s\n",
+				id, to, ts.Format(time.RFC3339), reason, previewLine(body))
+		}
 		if holds := draftHoldRows(response); len(holds) > 0 {
 			fmt.Print("\nHELD\n")
 			for _, hold := range holds {
@@ -363,6 +384,47 @@ func deliveredRows(response map[string]any) []HistoryRecord {
 		return nil
 	}
 	return records
+}
+
+// spoolRows and deadRows decode the outbox and dead-letter lists an IPC
+// response carries, matching deliveredRows: a malformed or absent list prints
+// nothing rather than failing the read.
+func spoolRows(response map[string]any, key string) []OutboxMessage {
+	raw, err := json.Marshal(response[key])
+	if err != nil {
+		return nil
+	}
+	var records []OutboxMessage
+	if err := json.Unmarshal(raw, &records); err != nil {
+		return nil
+	}
+	return records
+}
+
+func deadRows(response map[string]any) []DeadMessage {
+	raw, err := json.Marshal(response["dead"])
+	if err != nil {
+		return nil
+	}
+	var records []DeadMessage
+	if err := json.Unmarshal(raw, &records); err != nil {
+		return nil
+	}
+	return records
+}
+
+// previewLine keeps a spool listing to one line per message: a dead letter can
+// carry a full 64 KiB body, and the point of the listing is to decide which
+// ones to open.
+func previewLine(body string) string {
+	flat := strings.Join(strings.Fields(body), " ")
+	if flat == "" {
+		return "(empty body)"
+	}
+	if clipped, ok := clipRunes(flat, 120); ok {
+		return clipped + "…"
+	}
+	return flat
 }
 
 func runPause(args []string) error {

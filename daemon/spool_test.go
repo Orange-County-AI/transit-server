@@ -198,3 +198,65 @@ func TestListIncomingToleratesRecordsWithoutATransport(t *testing.T) {
 		t.Fatalf("records = %#v; want the legacy entry with an empty transport", records)
 	}
 }
+
+// A dead-letter listing is the surface that exists to make a silent send
+// failure visible, so one unparseable file must cost only itself. Before this
+// was fixed a single corrupt entry made ListDead return an error, which made
+// `transit inbox` print nothing at all and hid every other dead letter on the
+// box - the same failure the listing exists to expose.
+func TestListDeadReportsAnUnreadableEntryAndKeepsTheRest(t *testing.T) {
+	root := t.TempDir()
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := &OutboxMessage{
+		ID: "tx_000000000001", From: "stub@ticket500", To: "jessica@titan",
+		Body: "real content", TS: time.Now().UTC(),
+	}
+	if err := store.Enqueue(good); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.Claim(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Kill(claimed, "no_route"); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := filepath.Join(root, "dead", "tx_000000000002.json")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dead, err := store.ListDead()
+	if err != nil {
+		t.Fatalf("ListDead returned an error and hid every entry: %v", err)
+	}
+	if len(dead) != 2 {
+		t.Fatalf("want 2 entries (the real one and the unreadable one), got %d", len(dead))
+	}
+	var sawReal, sawUnreadable bool
+	for _, entry := range dead {
+		if entry.Message == nil {
+			t.Fatalf("entry has no message: %+v", entry)
+		}
+		switch entry.Message.ID {
+		case "tx_000000000001":
+			sawReal = true
+			if entry.Reason != "no_route" || entry.Message.Body != "real content" {
+				t.Fatalf("real entry was altered: %+v", entry)
+			}
+		case "tx_000000000002":
+			sawUnreadable = true
+			if entry.Message.TS.IsZero() {
+				t.Fatal("unreadable entry must carry the file mtime, not a zero time")
+			}
+		default:
+			t.Fatalf("unexpected entry %q", entry.Message.ID)
+		}
+	}
+	if !sawReal || !sawUnreadable {
+		t.Fatalf("real=%v unreadable=%v", sawReal, sawUnreadable)
+	}
+}
