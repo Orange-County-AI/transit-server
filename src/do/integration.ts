@@ -809,6 +809,8 @@ export class Integration extends DurableObject<Env> {
         ).queueDelivery({
           messageId: delivery.id,
           org: meta.org,
+          targetOrg: meta.org,
+          targetHost: target.host,
           agent: target.name,
           targetAddr: target.address,
           envelope,

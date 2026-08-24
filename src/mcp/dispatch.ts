@@ -71,6 +71,12 @@ function actor(principal: McpPrincipal): string {
   return address;
 }
 
+/** The acting agent's bare name; the queue is keyed by name, not address. */
+function agentName(principal: McpPrincipal): string {
+  actor(principal);
+  return principal.name!;
+}
+
 function hub(env: Env, principal: McpPrincipal) {
   // Through `identityOf` rather than reading `principal.host` directly: a null
   // host interpolated into a Durable Object name addresses an object literally
@@ -163,13 +169,32 @@ async function runTool(
             : {}),
         }),
       );
-    case "mark_handled":
+    case "mark_handled": {
+      const deliveryId = required(args, "delivery_id");
+      // The prefix already discriminates everywhere else that takes an id -
+      // `read_message` branches on exactly this - so "I am done with it" stays
+      // one verb rather than growing a second tool for the inbox.
+      if (deliveryId.startsWith("tx_")) {
+        const settled = await hub(env, principal).settleInbox(
+          agentName(principal),
+          deliveryId,
+        );
+        return JSON.stringify(settled);
+      }
       return JSON.stringify(
         await rpc(env, principal, "mark_handled", {
-          delivery_id: required(args, "delivery_id"),
+          delivery_id: deliveryId,
           caller: actor(principal),
         }),
       );
+    }
+    case "read_inbox": {
+      const waiting = await hub(env, principal).readInbox(agentName(principal));
+      if (waiting.length === 0) return "No messages waiting.";
+      // The envelopes verbatim, exactly the bytes a daemon would have injected
+      // into the session, so an agent reads the same thing either way.
+      return waiting.map((message) => message.envelope).join("\n\n");
+    }
     // These two only observe, so they read the directory service directly
     // rather than through a HostHub. That is not an optimisation: a signed-in
     // person has an organization and no host, and routing an org-scoped

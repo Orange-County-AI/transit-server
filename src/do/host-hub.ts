@@ -74,7 +74,20 @@ type SocketAttachment = DaemonAttachment | ViewerAttachment;
 
 export type QueueDeliveryInput = {
   messageId: string;
+  /** The SENDER's organization, carried for the archive and the ledger. */
   org: string;
+  /**
+   * The recipient's own organization and host slug — this hub's own coordinates.
+   *
+   * Required rather than derived, and required rather than optional. A Durable
+   * Object learns its identity from a daemon's `hello`, and the whole point of
+   * this phase is a recipient that has no daemon and so never sends one. Every
+   * caller already builds `org:<org>:host:<host>` to address this object, so
+   * every caller knows both; making them arguments means a new call site cannot
+   * quietly fall back to roster-only admission.
+   */
+  targetOrg: string;
+  targetHost: string;
   agent: string;
   targetAddr: string;
   envelope: string;
@@ -274,8 +287,93 @@ export class HostHub extends DurableObject<Env> {
     return (await this.ctx.storage.get<RosterAgent>(`roster:${name}`)) !== undefined;
   }
 
+  /**
+   * Whether a message addressed to this name has anywhere to land.
+   *
+   * A roster entry is one answer and it means "a daemon says this session is
+   * live". A live `agent_client` row is the other, and it means something
+   * different but no weaker: this address was DECLARED, durably, by an operator,
+   * and the agent holds a credential proving it. Delivery to it waits in this
+   * hub's queue until the agent reads it.
+   *
+   * That declaration is what makes the address routable, which is why a device
+   * token asserting a name in a header does not: the assertion lives for one
+   * request and nothing outside it ever knew the address existed. Such an agent
+   * can still send. It simply cannot be an address until somebody registers one.
+   *
+   * The roster is checked first and answers from storage. D1 is consulted only
+   * on a miss — the path that used to return `no_route` immediately.
+   */
+  private async canReceive(
+    name: string,
+    org: string,
+    host: string,
+  ): Promise<boolean> {
+    if (await this.hasAgent(name)) return true;
+    return Boolean(
+      await this.env.DB.prepare(
+        `SELECT 1 AS present
+         FROM agent_client c JOIN host h ON h.org_id = c.org_id AND h.slug = c.host
+         WHERE c.org_id = ? AND c.host = ? AND c.name = ?
+           AND c.revoked_at IS NULL AND h.revoked_at IS NULL
+         LIMIT 1`,
+      )
+        .bind(org, host, name)
+        .first(),
+    );
+  }
+
+  /**
+   * Everything queued for one agent, without settling any of it.
+   *
+   * The queue IS the inbox: a delivery to a daemonless agent is admitted and
+   * held by `dispatchQueued`, which already declines to move an entry it has no
+   * sink for, so nothing needed a second store. Reading does not settle,
+   * because a read that settles is a read that loses the message if the reader
+   * dies between fetching and acting — and every other delivery path in Transit
+   * is at-least-once with an explicit ack. `mark_handled` is that ack; until it
+   * arrives these entries come back, which is exactly what the envelope's `id`
+   * is for.
+   */
+  async readInbox(
+    agent: string,
+  ): Promise<{ id: string; envelope: string; enqueuedAt: number }[]> {
+    const queued = await this.ctx.storage.list<QueuedDelivery>({
+      prefix: `q:${agent}:`,
+    });
+    return [...queued.values()].map((item) => ({
+      id: item.messageId,
+      envelope: item.render
+        ? renderEnvelope({
+            ...item.render,
+            redelivery: (item.render.redelivery ?? 0) + item.attempts,
+          })
+        : item.envelope,
+      enqueuedAt: item.enqueuedAt,
+    }));
+  }
+
+  /**
+   * Settles one inbox entry on the reader's say-so. Ownership comes from the
+   * per-recipient marker `d:<id>:<agent>`, so an agent can only settle what was
+   * queued for it; a miss reads as "not yours or already settled" rather than
+   * as an error.
+   */
+  async settleInbox(agent: string, messageId: string): Promise<{ settled: boolean }> {
+    const marker = await this.ctx.storage.get<DeliveryMarker>(
+      `d:${messageId}:${agent}`,
+    );
+    if (!marker || marker.status !== "queued") return { settled: false };
+    await this.handleDeliveryAck(messageId, agent, "mcp");
+    return { settled: true };
+  }
+
   async queueDelivery(input: QueueDeliveryInput): Promise<{ status: "queued" | "duplicate" | "no_route" }> {
-    if (!(await this.hasAgent(input.agent))) return { status: "no_route" };
+    if (
+      !(await this.canReceive(input.agent, input.targetOrg, input.targetHost))
+    ) {
+      return { status: "no_route" };
+    }
 
     const result = await this.ctx.storage.transaction(async (transaction) => {
       // The dedupe marker is per recipient: one message id may legitimately be
@@ -842,16 +940,21 @@ export class HostHub extends DurableObject<Env> {
       return this.rejectSend(stateKey, "no_route");
     }
 
+    // Admission is `queueDelivery`'s alone. There used to be a roster check
+    // here as well, which meant two places decided whether an address exists —
+    // and this one, being first, silently overrode the other the moment they
+    // disagreed. They disagree now: a declared agent with no daemon is
+    // routable, and this gate said otherwise. The `no_route` it produced is
+    // still produced, just by the code that owns the question.
     const targetHub = this.env.HOST_HUB.getByName(
       `org:${targetOrg}:host:${target.host}`,
     );
-    if (!(await targetHub.hasAgent(target.name))) {
-      return this.rejectSend(stateKey, "no_route");
-    }
 
     const queued = await targetHub.queueDelivery({
       messageId: frame.id,
       org: identity.org,
+      targetOrg,
+      targetHost: target.host,
       agent: target.name,
       targetAddr: target.address,
       envelope: renderEnvelope({

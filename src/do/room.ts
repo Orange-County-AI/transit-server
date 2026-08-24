@@ -337,6 +337,8 @@ export class Room extends DurableObject<Env> {
           const result = await hub.queueDelivery({
             messageId: entry.id,
             org: config.org,
+            targetOrg: member.org,
+            targetHost: target.host,
             agent: target.name,
             targetAddr: target.address,
             envelope: renderEnvelope({
@@ -400,6 +402,8 @@ export class Room extends DurableObject<Env> {
         ).queueDelivery({
           messageId: input.deliveryId,
           org: config.org,
+          targetOrg: member.org,
+          targetHost: target.host,
           agent: target.name,
           targetAddr: target.address,
           envelope: input.envelope,

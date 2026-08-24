@@ -163,6 +163,7 @@ describe("server-side MCP endpoint", () => {
       "list_agents",
       "list_rooms",
       "mark_handled",
+      "read_inbox",
       "read_message",
       "send_message",
       "whoami",
