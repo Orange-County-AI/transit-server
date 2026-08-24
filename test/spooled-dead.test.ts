@@ -65,6 +65,13 @@ async function connect(credentials: Credentials) {
   response.webSocket!.accept();
   const frames = readFrames(response.webSocket!);
   frames.send({ t: "hello", proto: 1, daemon_ver: "dead-test", host: credentials.host });
+  // Wait for the handshake before returning. Every caller's first act is to
+  // send a roster frame, and returning early raced it against the hub's hello
+  // bookkeeping: the roster was dropped and `spooled_dead` stayed null past the
+  // poll window, roughly one run in three under full-suite load. The real
+  // daemon does not have this bug — client.go waits for hello_ok before
+  // sendRoster — so the race was in this helper, not in the product.
+  expect(await frames.next()).toMatchObject({ t: "hello_ok" });
   return frames;
 }
 
