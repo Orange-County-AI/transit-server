@@ -114,6 +114,9 @@ type SendState = {
   code?: SendNakCode;
 };
 
+/** How a send was admitted, independent of how the caller is told about it. */
+export type SendOutcome = { status: "ack" } | { status: "nak"; code: SendNakCode };
+
 type ActivityEvent = {
   type: string;
   at: number;
@@ -611,15 +614,37 @@ export class HostHub extends DurableObject<Env> {
     identity: HostIdentity,
     frame: Extract<DaemonFrame, { t: "send" }>,
   ): Promise<void> {
+    const outcome = await this.admitSend(identity, frame, { verifyRoster: true });
+    this.sendFrame(
+      socket,
+      outcome.status === "ack"
+        ? { t: "send_ack", id: frame.id }
+        : { t: "send_nak", id: frame.id, code: outcome.code },
+    );
+  }
+
+  /**
+   * Admits a send and reports the outcome. Every route into Transit's send
+   * path - the daemon wire and the server-side MCP endpoint - goes through
+   * here, so idempotency, rate limits, size bounds, plan limits, room
+   * membership and cross-organization resolution cannot diverge between them.
+   *
+   * `verifyRoster` is the one thing that legitimately differs. A daemon frame
+   * asserts a `from` the daemon itself published, so the roster is what stops
+   * it naming an agent it never reported. An MCP caller has already proven the
+   * host's own credential, which carries that same authority, and may have no
+   * daemon - and therefore no roster - at all.
+   */
+  private async admitSend(
+    identity: HostIdentity,
+    frame: Extract<DaemonFrame, { t: "send" }>,
+    options: { verifyRoster: boolean },
+  ): Promise<SendOutcome> {
     const stateKey = `s:${frame.id}`;
     const prior = await this.ctx.storage.get<SendState>(stateKey);
-    if (prior?.status === "ack") {
-      this.sendFrame(socket, { t: "send_ack", id: frame.id });
-      return;
-    }
+    if (prior?.status === "ack") return { status: "ack" };
     if (prior?.status === "nak" && prior.code) {
-      this.sendFrame(socket, { t: "send_nak", id: frame.id, code: prior.code });
-      return;
+      return { status: "nak", code: prior.code };
     }
     await this.ctx.storage.put<SendState>(stateKey, { status: "processing" });
 
@@ -633,18 +658,16 @@ export class HostHub extends DurableObject<Env> {
         error instanceof AddressError && error.code === "reserved_name"
           ? "reserved_name"
           : "no_route";
-      await this.rejectSend(socket, stateKey, frame.id, code);
-      return;
+      return this.rejectSend(stateKey, code);
     }
 
     if (
       from.kind !== "agent" ||
       from.organization !== undefined ||
       from.host !== identity.slug ||
-      !(await this.hasAgent(from.name))
+      (options.verifyRoster && !(await this.hasAgent(from.name)))
     ) {
-      await this.rejectSend(socket, stateKey, frame.id, "no_route");
-      return;
+      return this.rejectSend(stateKey, "no_route");
     }
     if (
       !(await consumeStoredToken(
@@ -654,16 +677,13 @@ export class HostHub extends DurableObject<Env> {
         10,
       ))
     ) {
-      await this.rejectSend(socket, stateKey, frame.id, "rate_limited");
-      return;
+      return this.rejectSend(stateKey, "rate_limited");
     }
     if (textEncoder.encode(frame.body).byteLength > MAX_MESSAGE_BYTES) {
-      await this.rejectSend(socket, stateKey, frame.id, "body_too_large");
-      return;
+      return this.rejectSend(stateKey, "body_too_large");
     }
     if (!(await this.canAcceptMessage(identity.org))) {
-      await this.rejectSend(socket, stateKey, frame.id, "plan_limit");
-      return;
+      return this.rejectSend(stateKey, "plan_limit");
     }
     if (target.kind === "room") {
       let roomOrg = identity.org;
@@ -675,8 +695,7 @@ export class HostHub extends DurableObject<Env> {
           target.organization,
         );
         if (!connected) {
-          await this.rejectSend(socket, stateKey, frame.id, "no_route");
-          return;
+          return this.rejectSend(stateKey, "no_route");
         }
         roomOrg = connected.targetOrgId;
         memberAddress = formatAgentAddress(
@@ -694,8 +713,7 @@ export class HostHub extends DurableObject<Env> {
         `org:${roomOrg}:room:${target.room}`,
       );
       if (!roomExists || !(await room.hasMember(memberAddress))) {
-        await this.rejectSend(socket, stateKey, frame.id, "not_member");
-        return;
+        return this.rejectSend(stateKey, "not_member");
       }
       try {
         await room.post(memberAddress, frame.body, frame.reply_to, frame.id);
@@ -706,12 +724,10 @@ export class HostHub extends DurableObject<Env> {
             : error instanceof Error && error.message === "plan_limit"
               ? "plan_limit"
               : "not_member";
-        await this.rejectSend(socket, stateKey, frame.id, code);
-        return;
+        return this.rejectSend(stateKey, code);
       }
       this.recordAcceptedMessage();
       await this.ctx.storage.put<SendState>(stateKey, { status: "ack" });
-      this.sendFrame(socket, { t: "send_ack", id: frame.id });
       await this.broadcast(
         {
           type: "message_committed",
@@ -722,7 +738,7 @@ export class HostHub extends DurableObject<Env> {
         },
         identity.org,
       );
-      return;
+      return { status: "ack" };
     }
 
     let targetOrg = identity.org;
@@ -735,8 +751,7 @@ export class HostHub extends DurableObject<Env> {
         target.organization,
       );
       if (!connected) {
-        await this.rejectSend(socket, stateKey, frame.id, "no_route");
-        return;
+        return this.rejectSend(stateKey, "no_route");
       }
       targetOrg = connected.targetOrgId;
       connectionId = connected.connectionId;
@@ -753,16 +768,14 @@ export class HostHub extends DurableObject<Env> {
       .bind(targetOrg, target.host)
       .first<{ id: string }>();
     if (!targetHost) {
-      await this.rejectSend(socket, stateKey, frame.id, "no_route");
-      return;
+      return this.rejectSend(stateKey, "no_route");
     }
 
     const targetHub = this.env.HOST_HUB.getByName(
       `org:${targetOrg}:host:${target.host}`,
     );
     if (!(await targetHub.hasAgent(target.name))) {
-      await this.rejectSend(socket, stateKey, frame.id, "no_route");
-      return;
+      return this.rejectSend(stateKey, "no_route");
     }
 
     const queued = await targetHub.queueDelivery({
@@ -781,12 +794,10 @@ export class HostHub extends DurableObject<Env> {
       ...(connectionId ? { connectionId } : {}),
     });
     if (queued.status === "no_route") {
-      await this.rejectSend(socket, stateKey, frame.id, "no_route");
-      return;
+      return this.rejectSend(stateKey, "no_route");
     }
 
     await this.ctx.storage.put<SendState>(stateKey, { status: "ack" });
-    this.sendFrame(socket, { t: "send_ack", id: frame.id });
     this.recordAcceptedMessage();
     this.mirrorMessage(
       identity.org,
@@ -805,16 +816,15 @@ export class HostHub extends DurableObject<Env> {
       },
       identity.org,
     );
+    return { status: "ack" };
   }
 
   private async rejectSend(
-    socket: WebSocket,
     stateKey: string,
-    id: string,
     code: SendNakCode,
-  ): Promise<void> {
+  ): Promise<SendOutcome> {
     await this.ctx.storage.put<SendState>(stateKey, { status: "nak", code });
-    this.sendFrame(socket, { t: "send_nak", id, code });
+    return { status: "nak", code };
   }
 
   private mirrorMessage(
@@ -1234,6 +1244,39 @@ export class HostHub extends DurableObject<Env> {
     params: Record<string, unknown>,
   ): Promise<void> {
     try {
+      const result = await this.invokeRpc(identity, method, params, {
+        verifyRoster: true,
+      });
+      this.sendFrame(socket, { t: "rpc_result", rid, result });
+    } catch (error) {
+      this.sendFrame(socket, {
+        t: "rpc_result",
+        rid,
+        error: {
+          code: "rpc_error",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  }
+
+  /**
+   * The tool surface itself, with no transport in it. Both the daemon wire and
+   * the server-side MCP endpoint dispatch here so a tool cannot mean one thing
+   * over a socket and another over HTTP. Throws on failure; each transport
+   * renders that its own way.
+   *
+   * `verifyRoster` carries the same meaning it does in {@link admitSend}: a
+   * daemon-asserted caller must appear in the roster that daemon published; an
+   * MCP caller proved the host credential instead and may have no daemon.
+   */
+  private async invokeRpc(
+    identity: HostIdentity,
+    method: string,
+    params: Record<string, unknown>,
+    options: { verifyRoster: boolean },
+  ): Promise<unknown> {
+    {
       let result: unknown;
       if (method === "read_message") {
         if (typeof params.id !== "string") throw new Error("id is required");
@@ -1408,7 +1451,7 @@ export class HostHub extends DurableObject<Env> {
           caller.kind !== "agent" ||
           caller.organization !== undefined ||
           caller.host !== identity.slug ||
-          !(await this.hasAgent(caller.name))
+          (options.verifyRoster && !(await this.hasAgent(caller.name)))
         ) {
           throw new Error("invalid room caller");
         }
@@ -1467,16 +1510,7 @@ export class HostHub extends DurableObject<Env> {
       } else {
         throw new Error("unknown rpc method");
       }
-      this.sendFrame(socket, { t: "rpc_result", rid, result });
-    } catch (error) {
-      this.sendFrame(socket, {
-        t: "rpc_result",
-        rid,
-        error: {
-          code: "rpc_error",
-          message: error instanceof Error ? error.message : String(error),
-        },
-      });
+      return result;
     }
   }
 }
