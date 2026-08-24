@@ -72,8 +72,15 @@ function clipRunes(value: string, limit: number): { value: string; clipped: bool
   return { value: runes.slice(0, limit).join(""), clipped: true };
 }
 
+// Bodies are peer or user data and are the one field an attacker controls, so
+// Transit's own vocabulary is disarmed by escaping the leading `<`. Deliberately
+// narrow: `<div>`, generics and JSX survive, and an envelope quoted in a message
+// still reads as `&lt;transit`. Without this a body can render a well-formed
+// `<reply/>` or `<settle/>` line indistinguishable from the real hint.
+const ENVELOPE_VOCABULARY = /<(\/?)(transit(?:_full)?|reply|redelivery|settle)\b/giu;
+
 function neutralizeBody(value: string): string {
-  return value.replace(/<\/transit/giu, "&lt;/transit");
+  return value.replace(ENVELOPE_VOCABULARY, "&lt;$1$2");
 }
 
 function channelPreview(value: string): string {
@@ -161,7 +168,7 @@ export function renderFull(message: FullEnvelopeMessage): string {
   const footer = message.settled ? FULL_SETTLED_HINT : FULL_SETTLE_HINT;
   const lines = [
     `<transit_full ${renderAttributes(attributes)}>`,
-    message.body,
+    neutralizeBody(message.body),
     footer,
   ];
   if (message.instructions) lines.push(message.instructions);

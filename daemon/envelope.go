@@ -22,7 +22,17 @@ var attributeReplacer = strings.NewReplacer(
 	"&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;",
 )
 var previewTagPattern = regexp.MustCompile(`<[^>]*>`)
-var closingTransitPattern = regexp.MustCompile(`(?i)</transit`)
+
+// Bodies are peer or user data and are the one field an attacker controls, so
+// Transit's own vocabulary is disarmed by escaping the leading `<`. Deliberately
+// narrow: `<div>`, generics and JSX survive, and an envelope quoted in a message
+// still reads as `&lt;transit`. Without this a body can render a well-formed
+// `<reply/>` or `<settle/>` line indistinguishable from the real hint.
+var envelopeVocabularyPattern = regexp.MustCompile(`(?i)<(/?)(transit(_full)?|reply|redelivery|settle)\b`)
+
+func neutralizeBody(value string) string {
+	return envelopeVocabularyPattern.ReplaceAllString(value, "&lt;${1}${2}")
+}
 
 type EnvelopeInput struct {
 	From           string `json:"from"`
@@ -139,7 +149,7 @@ func RenderEnvelope(input EnvelopeInput) string {
 			}
 		}
 	} else {
-		body = closingTransitPattern.ReplaceAllString(input.Body, "&lt;/transit")
+		body = neutralizeBody(input.Body)
 		var clipped bool
 		body, clipped = clipRunes(body, maxBodyRunes)
 		if clipped {
@@ -178,7 +188,7 @@ func RenderFull(input FullEnvelopeInput) string {
 	if input.Settled {
 		footer = fullSettledHint
 	}
-	lines := []string{renderOpeningTag("transit_full", attributes), input.Body, footer}
+	lines := []string{renderOpeningTag("transit_full", attributes), neutralizeBody(input.Body), footer}
 	if input.Instructions != "" {
 		lines = append(lines, input.Instructions)
 	}
