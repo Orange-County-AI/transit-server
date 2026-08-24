@@ -51,6 +51,13 @@ type JsonRpcResponse =
   | { jsonrpc: "2.0"; id: JsonRpcId; result: unknown }
   | { jsonrpc: "2.0"; id: JsonRpcId; error: { code: number; message: string } };
 
+/**
+ * A batch is one authenticated request that can carry many tool calls, so an
+ * uncapped one is an amplifier: the cost to the caller stays flat while the
+ * work here grows without limit. Well above anything a real client sends.
+ */
+const MAX_BATCH_SIZE = 32;
+
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
@@ -193,6 +200,16 @@ export async function handleMcp(
   const entries: unknown[] = Array.isArray(payload) ? payload : [payload];
   if (batch && entries.length === 0) {
     return json(errorResponse(null, INVALID_REQUEST, "empty batch"), 400);
+  }
+  if (entries.length > MAX_BATCH_SIZE) {
+    return json(
+      errorResponse(
+        null,
+        INVALID_REQUEST,
+        `batch exceeds ${MAX_BATCH_SIZE} requests`,
+      ),
+      400,
+    );
   }
 
   const responses: JsonRpcResponse[] = [];

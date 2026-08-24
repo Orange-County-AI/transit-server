@@ -243,8 +243,12 @@ with its URL rewritten to the configured route while `/mcp` keeps the address
 the caller dialled, so deriving from the request hands a connector a challenge
 naming one origin and a `resource` naming another — which fails silently.
 
-Consent lives in the SPA at `/oauth2/consent` and is reached only when the
-authorization request asks for `prompt=consent`.
+Consent lives in the SPA at `/oauth2/consent`. Transit forces the prompt unless
+a prior grant already covers that user, client and scopes, because Better Auth
+leaves it to the client to ask for — see `docs/security.md`. Registration is
+gated behind an organization owner or admin, so `registration_endpoint` is
+deliberately absent from the metadata and an operator supplies the client id and
+secret to Claude as a custom connector.
 
 **A signed-in person is not yet a Transit participant.** They hold an
 organization and no address, so `list_agents`, `list_rooms` and `whoami` work

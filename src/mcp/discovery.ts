@@ -97,7 +97,6 @@ export function authorizationServerMetadata(
     issuer: origin,
     authorization_endpoint: `${origin}${AUTH_BASE}/mcp/authorize`,
     token_endpoint: `${origin}${AUTH_BASE}/mcp/token`,
-    registration_endpoint: `${origin}${AUTH_BASE}/mcp/register`,
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
     grant_types_supported: ["authorization_code", "refresh_token"],
@@ -121,7 +120,12 @@ export function authorizationServerMetadata(
     //   id_token_signing_alg_values_supported - would have to say HS256 with a
     //                       key the client never sees, which tells a client
     //                       nothing it can act on.
-    //   client_id_metadata_document_supported - CIMD is not implemented, so
-    //                       registration is DCR.
+    //   registration_endpoint - dynamic client registration is gated behind an
+    //                       authenticated organization admin, so it is not a
+    //                       door a connector can walk through on its own. An
+    //                       operator registers the client and enters its id and
+    //                       secret into Claude as a custom connector. Better to
+    //                       omit it than to advertise a URL that answers 401.
+    //   client_id_metadata_document_supported - CIMD is not implemented.
   };
 }

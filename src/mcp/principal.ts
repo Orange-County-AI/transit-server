@@ -104,10 +104,22 @@ async function resolveUserSession(
   if (!session) return UNAUTHORIZED;
   // Scoped exactly as a browser session is: the membership row is what makes an
   // organization theirs, not a claim in a token.
+  //
+  // The dashboard follows `session.activeOrganizationId`, which this cannot:
+  // that choice lives on a browser session and an access token outlives it. So
+  // the personal organization is preferred - `id` equals the user id, and it is
+  // what a new session defaults to - with the oldest membership as the
+  // fallback. The consequence, which nothing here can fix without recording the
+  // choice at authorize time: a multi-org member who switches organizations in
+  // the UI keeps acting in their personal one over MCP. The membership row
+  // still bounds it, so this is surprising rather than permissive.
   const membership = await env.DB.prepare(
-    "SELECT organization_id FROM member WHERE user_id = ? ORDER BY created_at LIMIT 1",
+    `SELECT organization_id FROM member
+     WHERE user_id = ?
+     ORDER BY CASE WHEN organization_id = ? THEN 0 ELSE 1 END, created_at
+     LIMIT 1`,
   )
-    .bind(session.userId)
+    .bind(session.userId, session.userId)
     .first<{ organization_id: string }>();
   if (!membership) return UNAUTHORIZED;
   return {

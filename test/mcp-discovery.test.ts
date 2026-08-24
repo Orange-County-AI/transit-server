@@ -62,7 +62,7 @@ describe("Claude connector discovery", () => {
       issuer: string;
       authorization_endpoint: string;
       token_endpoint: string;
-      registration_endpoint: string;
+      registration_endpoint?: string;
       code_challenge_methods_supported: string[];
       grant_types_supported: string[];
     }>();
@@ -72,11 +72,27 @@ describe("Claude connector discovery", () => {
     expect(as.code_challenge_methods_supported).toEqual(["S256"]);
     expect(as.grant_types_supported).toContain("authorization_code");
 
-    // 4. Dynamic client registration, because CIMD needs a flag this Better
-    // Auth version does not emit. JSON body, unlike the token endpoint.
-    const registered = await SELF.fetch(as.registration_endpoint, {
+    // 4. Registration is NOT part of the connector's automatic path: it is
+    // gated behind an organization operator, so the metadata does not offer it
+    // and Claude is given a pre-registered client id and secret instead. See
+    // test/oauth-hijack.test.ts for why open registration is not on the table.
+    expect(as.registration_endpoint).toBeUndefined();
+    const operator = await SELF.fetch(`${ORIGIN}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: ORIGIN },
+      body: JSON.stringify({
+        email: "discovery-operator@test.example",
+        password: "test1234!",
+        name: "Operator",
+      }),
+    });
+    const cookie = operator.headers
+      .getSetCookie()
+      .map((entry) => entry.split(";")[0])
+      .join("; ");
+    const registered = await SELF.fetch(`${ORIGIN}/api/auth/mcp/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: ORIGIN, cookie },
       body: JSON.stringify({
         client_name: "Claude",
         redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],

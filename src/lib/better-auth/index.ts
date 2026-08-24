@@ -112,7 +112,17 @@ function mcpPlugin() {
     // Under `oidcConfig`, not beside `loginPage`: the plugin spreads
     // `oidcConfig` into the options its authorize handler reads, and a
     // `consentPage` set anywhere else is silently ignored.
-    oidcConfig: { loginPage: "/login", consentPage: "/oauth2/consent" },
+    oidcConfig: {
+      loginPage: "/login",
+      consentPage: "/oauth2/consent",
+      // Off by default, and its absence is half of an authorization-code
+      // interception: a confidential client registered by an attacker can skip
+      // the challenge entirely and exchange a stolen code with only its own
+      // secret. Claude always sends S256, and the discovery document already
+      // advertises it as the only method, so requiring it costs nothing and
+      // makes the advertisement true.
+      requirePKCE: true,
+    },
   });
 }
 

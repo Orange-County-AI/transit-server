@@ -30,6 +30,52 @@ it is 32 random bytes, shown and stored only once at enrollment, retained only
 as a SHA-256 hash, and revocable. Revoking a device token immediately
 terminates that host's WebSocket session.
 
+Two credentials reach the server-side MCP endpoint, and both are additions to
+the device token rather than replacements for it.
+
+An **agent client** is an OAuth client whose access token's subject IS an agent.
+Its secret is 32 random bytes, shown once, stored only as a SHA-256 hash.
+Organization, host and agent name are read back from the `agent_client` row on
+every request and never from the token's own claims, so a validly signed token
+claiming otherwise acts where its row says, and revoking the client — or the
+host it hangs off — takes effect immediately rather than at the token's expiry.
+`X-Transit-Agent` is ignored entirely on this path: the token is the proof of
+identity, and honouring a header beside it would let a credential minted for one
+agent act as another.
+
+A **person** reaches it through authorization code with S256 PKCE. Three things
+about that flow are Transit's rather than Better Auth's, and each closes a link
+in a chain that was exploitable together:
+
+- **Consent is enforced by the server.** Better Auth records
+  `requireConsent: query.prompt === "consent"` and, when the prompt is absent,
+  mints the code and redirects before the consent page is ever considered — so
+  its consent screen gates nothing against a client that omits the parameter.
+  Transit forces the prompt unless a prior grant already covers that exact user,
+  client and scopes.
+- **Registration is not open.** `POST /api/auth/mcp/register` requires a signed-in
+  organization owner or admin. An open registration endpoint lets anyone mint a
+  client named "Claude" pointing at their own redirect URI, which is what turned
+  the missing consent gate into a one-click read of a victim's organization. The
+  cost is that an operator registers the client by hand and enters its id and
+  secret into Claude as a custom connector; `registration_endpoint` is therefore
+  omitted from the advertised metadata rather than advertised and refused. A
+  self-hoster who prefers open dynamic registration can remove that route,
+  knowingly.
+- **PKCE is required, not merely offered.** Without it a confidential client can
+  redeem a stolen code with its own secret alone.
+
+`/api/auth/mcp/get-session` is closed. It returns the whole access-token row,
+refresh token included, to any holder of the one-hour access token; Transit
+reads that session in process and never over HTTP.
+
+**Not yet implemented, and deployment configuration rather than code:** neither
+`POST /oauth/token` nor an unauthenticated `POST /mcp` is rate limited. A Worker
+has no shared counter without adding a Durable Object hop to every
+unauthenticated request, which is itself an amplifier, so this belongs in a
+Cloudflare rate-limiting rule at the edge. A hosted deployment should configure
+one; a self-hoster should know it is absent.
+
 Each public `transit.ingest/1` source has its own HMAC secret. The Worker verifies
 the per-source HMAC and timestamp window before processing an ingress request.
 Built-in connectors also retain their native inbound checks: Telegram's secret

@@ -42,10 +42,10 @@ async function signUp(email: string): Promise<string> {
     .join("; ");
 }
 
-async function registerClient(): Promise<string> {
+async function registerClient(cookie: string): Promise<string> {
   const response = await SELF.fetch(`${ORIGIN}/api/auth/mcp/register`, {
     method: "POST",
-    headers: { "content-type": "application/json", origin: ORIGIN },
+    headers: { "content-type": "application/json", origin: ORIGIN, cookie },
     body: JSON.stringify({
       client_name: "Claude",
       redirect_uris: [REDIRECT_URI],
@@ -114,7 +114,7 @@ async function callTool(token: string, name: string): Promise<{ text: string; is
 describe("human OAuth against /mcp", () => {
   it("carries a signed-in person from authorize to a working access token", async () => {
     const cookie = await signUp("mcp-human@test.example");
-    const clientId = await registerClient();
+    const clientId = await registerClient(cookie);
     const { verifier, challenge } = await pkce();
 
     // The room proves the token is scoped to this person's organization rather
@@ -126,16 +126,35 @@ describe("human OAuth against /mcp", () => {
     });
     expect(room.status).toBe(201);
 
+    // NO `prompt=consent`, which is what an attacker's client omits. Better
+    // Auth mints the code and redirects before it looks at the consent page, so
+    // without the server forcing the prompt this returns a working code to
+    // whatever redirect_uri the client registered. It must not.
     const authorized = await SELF.fetch(authorizeUrl(clientId, challenge), {
       headers: { cookie, origin: ORIGIN },
       redirect: "manual",
     });
     const location = authorized.headers.get("location") ?? "";
-    expect(location, "an authenticated authorize should return a code").toContain(
-      REDIRECT_URI,
+    expect(
+      location,
+      "an authorize with no prior consent must not hand back a code",
+    ).not.toContain(REDIRECT_URI);
+    const consentRedirect = new URL(location, ORIGIN);
+    expect(consentRedirect.pathname).toBe("/oauth2/consent");
+
+    // Approving is what produces the code.
+    const approved = await SELF.fetch(`${ORIGIN}/api/auth/oauth2/consent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: ORIGIN, cookie },
+      body: JSON.stringify({
+        accept: true,
+        consent_code: consentRedirect.searchParams.get("consent_code"),
+      }),
+    });
+    expect(approved.status, await approved.clone().text()).toBe(200);
+    const callback = new URL(
+      (await approved.json<{ redirectURI: string }>()).redirectURI,
     );
-    const callback = new URL(location);
-    expect(callback.searchParams.get("state")).toBe("opaque-state");
     const code = callback.searchParams.get("code");
     expect(code).toBeTruthy();
 
@@ -186,21 +205,27 @@ describe("human OAuth against /mcp", () => {
     expect(sendBody.result.isError).toBe(true);
     expect(sendBody.result.content[0]!.text).toContain("not bound to a host");
 
-    // A wrong PKCE verifier must not produce a token.
-    const replay = await SELF.fetch(authorizeUrl(clientId, challenge, { state: "b" }), {
+    // A second authorize now skips the screen, because this user HAS granted
+    // these scopes to this client. Forcing consent every time would be a
+    // different bug.
+    const repeat = await SELF.fetch(authorizeUrl(clientId, challenge, { state: "b" }), {
       headers: { cookie, origin: ORIGIN },
       redirect: "manual",
     });
-    const secondCode = new URL(replay.headers.get("location") ?? "").searchParams.get(
-      "code",
+    const repeatLocation = repeat.headers.get("location") ?? "";
+    expect(repeatLocation, "a prior grant should not re-prompt").toContain(
+      REDIRECT_URI,
     );
+    const secondCode = new URL(repeatLocation).searchParams.get("code");
+
+    // A wrong PKCE verifier must not produce a token.
     const wrongVerifier = await exchange(clientId, secondCode!, "not-the-verifier");
     expect(wrongVerifier.status).not.toBe(200);
   });
 
   it("sends the browser to the SPA's consent route when consent is prompted", async () => {
     const cookie = await signUp("mcp-human-consent@test.example");
-    const clientId = await registerClient();
+    const clientId = await registerClient(cookie);
     const { verifier, challenge } = await pkce();
 
     const prompted = await SELF.fetch(
@@ -236,7 +261,7 @@ describe("human OAuth against /mcp", () => {
 
   it("refuses consent without breaking the flow", async () => {
     const cookie = await signUp("mcp-human-deny@test.example");
-    const clientId = await registerClient();
+    const clientId = await registerClient(cookie);
     const { challenge } = await pkce();
 
     const prompted = await SELF.fetch(

@@ -371,12 +371,27 @@ app.get("/api/oauth-clients/:clientId", async (context) => {
   });
   if (!session) return context.json({ error: "Unauthorized" }, 401);
   const row = await context.env.DB.prepare(
-    "SELECT client_id, name, icon FROM oauth_application WHERE client_id = ? AND disabled = 0 LIMIT 1",
+    `SELECT client_id, name, icon, redirect_urls FROM oauth_application
+     WHERE client_id = ? AND disabled = 0 LIMIT 1`,
   )
     .bind(context.req.param("clientId"))
-    .first<{ client_id: string; name: string | null; icon: string | null }>();
+    .first<{
+      client_id: string;
+      name: string | null;
+      icon: string | null;
+      redirect_urls: string | null;
+    }>();
   if (!row) return context.json({ error: "client_not_found" }, 404);
-  return context.json({ client_id: row.client_id, name: row.name, icon: row.icon });
+  return context.json({
+    client_id: row.client_id,
+    name: row.name,
+    icon: row.icon,
+    // Where an approval actually sends the code. A name is attacker-chosen and
+    // a consent screen that shows only the name conveys nothing checkable; the
+    // destination is the one fact worth reading. Server-side validation is
+    // exact-match against this list, so showing it cannot mislead.
+    redirect_uris: (row.redirect_urls ?? "").split(",").filter(Boolean),
+  });
 });
 
 app.get("/api/agent-clients", async (context) => {
@@ -461,6 +476,94 @@ app.delete("/api/agent-clients/:clientId", async (context) => {
   }
   return context.json({ revoked: true, client_id: context.req.param("clientId") });
 });
+
+/**
+ * Consent, enforced by the server rather than requested by the client.
+ *
+ * Better Auth's authorize handler records `requireConsent: query.prompt ===
+ * "consent"` and, when the prompt is absent, mints the code and redirects
+ * BEFORE it ever looks at the consent page (`mcp/authorize.mjs:96-113`). So the
+ * consent screen gates nothing against a client that simply omits the
+ * parameter — which an attacker's client does. Combined with registration, that
+ * was a one-click read of a victim's whole organization.
+ *
+ * The plugin exposes no option for this, so the prompt is forced here unless a
+ * prior grant already covers this exact user, client and scopes. Forcing rather
+ * than rejecting: Claude does not send the parameter either, and rejecting
+ * would break the connector instead of protecting it.
+ */
+app.get("/api/auth/mcp/authorize", async (context) => {
+  const url = new URL(context.req.url);
+  const clientId = url.searchParams.get("client_id");
+  // Absent scope means the plugin's own default, so the comparison below has to
+  // use the same value rather than an empty set that trivially "covers".
+  const requested = (url.searchParams.get("scope") ?? "openid")
+    .split(" ")
+    .filter(Boolean);
+  const session = await authFor(context).api.getSession({
+    headers: context.req.raw.headers,
+  });
+
+  let alreadyGranted = false;
+  if (session && clientId) {
+    // Better Auth appends a row per approval rather than updating one, so the
+    // grant is the union across rows, not the newest of them.
+    const rows = await context.env.DB.prepare(
+      `SELECT scopes FROM oauth_consent
+       WHERE client_id = ? AND user_id = ? AND consent_given = 1`,
+    )
+      .bind(clientId, session.user.id)
+      .all<{ scopes: string | null }>();
+    const granted = new Set(
+      rows.results.flatMap((row) => (row.scopes ?? "").split(" ").filter(Boolean)),
+    );
+    alreadyGranted =
+      rows.results.length > 0 && requested.every((scope) => granted.has(scope));
+  }
+  if (!alreadyGranted) url.searchParams.set("prompt", "consent");
+
+  // An unauthenticated visitor is redirected to sign in with this query stored
+  // in a signed cookie and replayed afterwards, so the forced prompt survives
+  // the login round trip.
+  return authFor(context).handler(new Request(url, context.req.raw));
+});
+
+/**
+ * Registration is for an operator, not for the internet.
+ *
+ * The plugin's `/mcp/register` resolves a session but does not require one, and
+ * applies no allowlist or limit. An open registration endpoint lets anyone mint
+ * a client called "Claude" pointing at their own redirect URI, which is the
+ * second link in the chain the forced consent above breaks.
+ *
+ * The trade-off is real and deliberate: Claude performs DCR unauthenticated
+ * during connector setup, so gating this means an operator registers the client
+ * by hand and enters the id and secret into Claude as a custom connector. For a
+ * deployment with one operator that is strictly safer — the client is scoped to
+ * the organization that created it instead of to whoever found the URL. A
+ * self-hoster who wants open DCR can remove this route; `docs/security.md` says
+ * so, and `registration_endpoint` is left out of the advertised metadata rather
+ * than advertised and refused.
+ */
+app.post("/api/auth/mcp/register", async (context) => {
+  const membership = await sessionOrganization(context);
+  if (!membership) return context.json({ error: "Unauthorized" }, 401);
+  if (!canAdministerOrganization(membership.role)) {
+    return context.json({ error: "forbidden" }, 403);
+  }
+  return authFor(context).handler(context.req.raw);
+});
+
+/**
+ * `/mcp/get-session` returns the whole `oauthAccessToken` row — including the
+ * REFRESH token — to any holder of the one-hour access token, which turns a
+ * leaked access token into seven days of access. Transit never calls it over
+ * HTTP: `/mcp` reads the session through `auth.api.getMcpSession()` in process.
+ * It exists here only to leak, so it is closed.
+ */
+app.all("/api/auth/mcp/get-session", (context) =>
+  context.json({ error: "not_found" }, 404),
+);
 
 app.on(["GET", "POST"], "/api/auth/*", (context) => {
   return authFor(context).handler(context.req.raw);
