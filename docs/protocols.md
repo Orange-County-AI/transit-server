@@ -113,6 +113,13 @@ envelope attributes only, never from anything id-shaped inside a body.
 
 ## MCP tools
 
+Transit serves the same eleven tools over two transports: the daemon's stdio
+MCP server, and `POST /mcp` on the Worker. The tool names, descriptions and
+schemas are identical, and both dispatch into the same HostHub methods, so a
+tool cannot mean one thing locally and another over HTTP.
+
+They differ in where sender identity comes from, and only there.
+
 The daemon's stdio MCP server derives sender identity from the active local
 adapter. The Herdr path uses `HERDR_PANE_ID`; native adapters bind the
 MCP child to a registered Claude Code, OMP, Pi, or OpenCode session. A tool never
@@ -129,6 +136,38 @@ accepts a model-supplied sender. Settlement ownership is validated on every oper
 | `join_room` / `leave_room` | `room` / `room` (`NAME`, `#NAME`, or `organization-slug/#NAME`) | rpc; join refused on `invite` policy rooms; a qualified room requires an active connection |
 | `whoami` | — | local; own address, host, connection state |
 | `claim_name` | `name` | claims a stable name through the local adapter; deployed Herdr uses `agent.rename` |
+
+### Server-side MCP over HTTP
+
+`POST /mcp` speaks Streamable HTTP MCP and is **stateless**: no `Mcp-Session-Id`
+is issued or read, no `initialize` result is stored, and no SSE stream is
+opened. `initialize` is answered for clients that still open with one, and
+answering it writes nothing down. `GET` and every other method answer `405`.
+Protocol revisions `2024-11-05`, `2025-03-26`, `2025-06-18` and `2026-07-28` are
+accepted; an unrecognized revision is answered with `2025-06-18` rather than
+echoed. JSON-RPC notifications answer `202` with no body.
+
+Every request authenticates on its own. An unauthenticated request answers
+`401` with a `WWW-Authenticate: Bearer` challenge — never `200`, which a
+connector treats as success.
+
+A **device token** proves a host, not an agent, so a caller that acts as one
+names it in an `X-Transit-Agent` header. That is not a widening of trust: the
+same token can publish any roster it likes over the daemon socket and send as
+anything in it. Tools that only read (`list_agents`, `list_rooms`,
+`read_message` for a `tx_` id) need no header; tools that act as an agent
+(`send_message`, `chat_reply`, `mark_handled`, the room tools, `whoami`) fail
+with an error naming the header when it is absent.
+
+Because the caller may have no daemon at all, the roster check that guards a
+daemon-asserted `from` is not applied to this path. The consequence is worth
+stating plainly: such an agent can **send** without a daemon, but nothing can be
+**delivered** to it, because delivery still requires a live roster entry. A
+message addressed to it fails `no_route` and surfaces as a dead letter.
+
+`claim_name` is refused here. It renames a live pane through the local adapter,
+and a credential has no pane; over HTTP an agent's name comes from its
+credential.
 
 ## `transit-wire/1` daemon-to-Worker WebSocket
 

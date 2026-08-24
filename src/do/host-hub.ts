@@ -117,6 +117,18 @@ type SendState = {
 /** How a send was admitted, independent of how the caller is told about it. */
 export type SendOutcome = { status: "ack" } | { status: "nak"; code: SendNakCode };
 
+/**
+ * A tool's answer, already JSON-encoded, or the message explaining why there
+ * isn't one.
+ *
+ * Encoded rather than structured because a Durable Object stub's return type
+ * passes through `Rpc.Serializable`: an `unknown` payload makes the whole
+ * `ok: true` arm resolve to `never`, and a recursive JSON value type makes the
+ * instantiation infinite. Either way the discriminant disappears at the call
+ * site, and the failure reads as a missing property rather than as this.
+ */
+export type RpcOutcome = { ok: true; json: string } | { ok: false; error: string };
+
 type ActivityEvent = {
   type: string;
   at: number;
@@ -196,6 +208,44 @@ export class HostHub extends DurableObject<Env> {
   async publishViewerEvent(payload: string): Promise<void> {
     for (const viewer of this.ctx.getWebSockets("viewer")) {
       if (viewer.readyState === 1) viewer.send(payload);
+    }
+  }
+
+  /**
+   * Send admission for a caller that proved a credential rather than holding a
+   * daemon socket - today the server-side MCP endpoint. The Worker has already
+   * resolved the credential to this host, so `identity` is trusted; the roster
+   * is not consulted, because such a caller may have no daemon at all. See
+   * {@link admitSend}.
+   */
+  async submitSend(
+    identity: HostIdentity,
+    frame: Extract<DaemonFrame, { t: "send" }>,
+  ): Promise<SendOutcome> {
+    return this.admitSend(identity, frame, { verifyRoster: false });
+  }
+
+  /**
+   * Tool dispatch for a credential-authorized caller. Reports the failure
+   * rather than throwing: a thrown error crossing a Durable Object RPC boundary
+   * loses its message, and the message is the whole content of a tool error.
+   * See {@link invokeRpc}.
+   */
+  async callRpc(
+    identity: HostIdentity,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<RpcOutcome> {
+    try {
+      const result = await this.invokeRpc(identity, method, params, {
+        verifyRoster: false,
+      });
+      return { ok: true, json: JSON.stringify(result ?? null) };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 
@@ -1193,6 +1243,7 @@ export class HostHub extends DurableObject<Env> {
   private async rpcCaller(
     identity: HostIdentity,
     params: Record<string, unknown>,
+    options: { verifyRoster: boolean },
   ): Promise<string> {
     if (typeof params.caller !== "string") throw new Error("caller is required");
     const caller = parseAddress(params.caller);
@@ -1200,7 +1251,7 @@ export class HostHub extends DurableObject<Env> {
       caller.kind !== "agent" ||
       caller.organization !== undefined ||
       caller.host !== identity.slug ||
-      !(await this.hasAgent(caller.name))
+      (options.verifyRoster && !(await this.hasAgent(caller.name)))
     ) {
       throw new Error("invalid rpc caller");
     }
@@ -1281,7 +1332,7 @@ export class HostHub extends DurableObject<Env> {
       if (method === "read_message") {
         if (typeof params.id !== "string") throw new Error("id is required");
         if (params.id.startsWith("dlv_")) {
-          const caller = await this.rpcCaller(identity, params);
+          const caller = await this.rpcCaller(identity, params, options);
           const integrationId = await this.integrationForDelivery(identity.org, params.id);
           result = await this.env.INTEGRATION.getByName(
             `org:${identity.org}:integration:${integrationId}`,
@@ -1313,7 +1364,7 @@ export class HostHub extends DurableObject<Env> {
         ) {
           throw new Error("delivery_id, conversation_id, and message are required");
         }
-        const caller = await this.rpcCaller(identity, params);
+        const caller = await this.rpcCaller(identity, params, options);
         const integrationId = await this.integrationForDelivery(
           identity.org,
           params.delivery_id,
@@ -1335,7 +1386,7 @@ export class HostHub extends DurableObject<Env> {
         if (typeof params.delivery_id !== "string") {
           throw new Error("delivery_id is required");
         }
-        const caller = await this.rpcCaller(identity, params);
+        const caller = await this.rpcCaller(identity, params, options);
         const integrationId = await this.integrationForDelivery(
           identity.org,
           params.delivery_id,

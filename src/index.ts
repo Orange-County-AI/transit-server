@@ -48,6 +48,7 @@ import {
   organizationPair,
   resolveConnectedOrganization,
 } from "./lib/transit/organizations";
+import { handleMcp } from "./mcp/http";
 import { HostHub } from "./do/host-hub";
 import { Room } from "./do/room";
 import { Integration } from "./do/integration";
@@ -297,6 +298,17 @@ app.get("/SKILL.md", () => {
     },
   });
 });
+
+/**
+ * Server-side MCP. An agent reaches Transit's tools over HTTP with a bearer
+ * credential, which is what makes a box with no daemon and no Herdr on it a
+ * place an agent can send from. Stateless: see `src/mcp/http.ts`.
+ */
+app.all("/mcp", (context) =>
+  handleMcp(context.env, context.req.raw, {
+    challenge: () => 'Bearer realm="transit"',
+  }),
+);
 
 app.on(["GET", "POST"], "/api/auth/*", (context) => {
   return authFor(context).handler(context.req.raw);
