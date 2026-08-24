@@ -1,6 +1,6 @@
 import { type BetterAuthPlugin, betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { organization } from "better-auth/plugins";
+import { mcp, organization } from "better-auth/plugins";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../../db/schema";
 import * as appSchema from "../../db/app-schema";
@@ -85,21 +85,55 @@ export function deriveTrustedOrigins(env: Env): string[] {
   return [...origins];
 }
 
+/**
+ * The authorization-code half of `/mcp`, for a HUMAN.
+ *
+ * Claude's connector performs exactly one flow — authorization code with S256
+ * PKCE — and will not do client credentials at all, so this plugin and the
+ * agent-token endpoint beside it are not two doors into one room. This one is
+ * for a person; that one is for an agent.
+ *
+ * Registration is Dynamic Client Registration rather than CIMD, because CIMD
+ * needs a `client_id_metadata_document_supported` flag this version does not
+ * emit. DCR is deprecated in the 2026-07-28 spec and works; at one operator's
+ * scale the client-sprawl warning that motivated deprecating it does not apply.
+ *
+ * The discovery documents this plugin serves are NOT the ones Transit
+ * advertises. Its `resource` defaults to the origin rather than the MCP URL,
+ * which is the single most common reason a Claude connector silently never
+ * connects, and its metadata names a `/mcp/userinfo` and a `/mcp/jwks` it does
+ * not mount. Transit serves its own; see `src/mcp/discovery.ts`.
+ */
+function mcpPlugin() {
+  return mcp({
+    // Where an unauthenticated browser lands mid-authorization. The SPA's own
+    // sign-in page, which returns to the authorize request afterwards.
+    loginPage: "/login",
+    // Under `oidcConfig`, not beside `loginPage`: the plugin spreads
+    // `oidcConfig` into the options its authorize handler reads, and a
+    // `consentPage` set anywhere else is silently ignored.
+    oidcConfig: { loginPage: "/login", consentPage: "/oauth2/consent" },
+  });
+}
+
 export const auth = (env: Env, extraPlugins: BetterAuthPlugin[] = []) => {
   const fullSchema = { ...schema, ...appSchema };
   const db = drizzle(env.DB, { schema: fullSchema });
 
-  // The organization plugin stays statically typed (its inferred session
-  // fields, notably `activeOrganizationId`, are read by callers), while
-  // deployment-supplied plugins are appended opaquely.
   const organizationPlugin = organization({
     teams: { enabled: false },
     disableOrganizationDeletion: true,
   });
-  const plugins: [typeof organizationPlugin, ...BetterAuthPlugin[]] = [
-    organizationPlugin,
-    ...extraPlugins,
-  ];
+  // Both stay statically typed: the organization plugin because callers read
+  // its inferred session fields, and the mcp plugin because `getMcpSession` is
+  // how `/mcp` reads a person's access token. Deployment-supplied plugins are
+  // appended opaquely.
+  const mcpAuthPlugin = mcpPlugin();
+  const plugins: [
+    typeof organizationPlugin,
+    typeof mcpAuthPlugin,
+    ...BetterAuthPlugin[],
+  ] = [organizationPlugin, mcpAuthPlugin, ...extraPlugins];
 
   return betterAuth({
     ...betterAuthOptions,

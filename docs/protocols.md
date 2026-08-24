@@ -205,9 +205,52 @@ escalation rather than the equivalence the header is for a device token.
 
 Device tokens keep working unchanged. The two credentials coexist.
 
-`scopes` is stored on the client and carried into the token, and **nothing
-enforces it today**. A token request may narrow what its row was granted and may
-never widen it, but no tool consults a scope. Treat it as reserved.
+There is **no scope model**. A token request that asks for one is refused with
+`invalid_scope`, and an issued token carries no `scope` claim, because nothing
+in Transit enforces a scope and a field that names a restriction which does not
+hold is worse than no field.
+
+### Human OAuth
+
+A person reaches `/mcp` through authorization code with S256 PKCE, which is the
+only flow Claude's connector performs — it will not do client credentials at
+all. Better Auth's `mcp` plugin serves `/api/auth/mcp/authorize`,
+`/api/auth/mcp/token` and `/api/auth/mcp/register`; registration is DCR, because
+CIMD needs a `client_id_metadata_document_supported` flag this version does not
+emit.
+
+Transit serves its **own** discovery documents at the root, and this is not
+incidental. The plugin's protected-resource document names the *origin* as
+`resource`, and Claude compares that field literally against the URL the user
+typed, which ends in `/mcp`; its authorization-server metadata names a
+`userinfo_endpoint` and a `jwks_uri` under `/mcp/…` that it never mounts, and
+declares `RS256` id_token signing while actually using HS256 under a key
+generated fresh per request. Transit advertises only what it serves.
+
+- `GET /.well-known/oauth-protected-resource` — `resource` is exactly the MCP
+  URL; `authorization_servers` has one entry, because Claude reads entry zero
+  and does not fall back.
+- `GET /.well-known/oauth-authorization-server` — RFC 8414, advertising
+  `code_challenge_methods_supported: ["S256"]` and no `jwks_uri`, since access
+  tokens are opaque and looked up rather than verified.
+- An unauthenticated `/mcp` answers **401** with
+  `WWW-Authenticate: Bearer resource_metadata="…"`. A `200` carrying the same
+  header is ignored, so the status is as load-bearing as the header.
+
+Every one of those strings is built from `BETTER_AUTH_URL`, not from the
+request. Behind an assets binding a `/.well-known/*` request reaches the Worker
+with its URL rewritten to the configured route while `/mcp` keeps the address
+the caller dialled, so deriving from the request hands a connector a challenge
+naming one origin and a `resource` naming another — which fails silently.
+
+Consent lives in the SPA at `/oauth2/consent` and is reached only when the
+authorization request asks for `prompt=consent`.
+
+**A signed-in person is not yet a Transit participant.** They hold an
+organization and no address, so `list_agents`, `list_rooms` and `whoami` work
+and every tool that acts *as* an agent refuses, naming the reason. Giving a
+human an agent-shaped address is a decision about a public namespace, not
+something to infer.
 
 ## `transit-wire/1` daemon-to-Worker WebSocket
 

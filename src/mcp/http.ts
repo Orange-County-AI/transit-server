@@ -1,5 +1,9 @@
 import { callTool } from "./dispatch";
-import { type McpPrincipal, resolvePrincipal } from "./principal";
+import {
+  type McpPrincipal,
+  type McpSessionReader,
+  resolvePrincipal,
+} from "./principal";
 import { MCP_INSTRUCTIONS, TRANSIT_TOOLS } from "./tools";
 
 /**
@@ -60,6 +64,12 @@ export type McpEndpointOptions = {
    * other status, so the 401 is load-bearing, not cosmetic.
    */
   challenge: (request: Request) => string;
+  /**
+   * Reads a Better Auth `mcp` access token. Supplied by the caller because it
+   * needs the Better Auth instance, which is built from deployment-supplied
+   * plugins this module deliberately knows nothing about.
+   */
+  mcpSession?: McpSessionReader;
 };
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}) {
@@ -162,7 +172,7 @@ export async function handleMcp(
 
   // Authenticate before reading the body: an unauthenticated request must
   // answer 401 whatever it was going to ask for.
-  const resolution = await resolvePrincipal(env, request.headers);
+  const resolution = await resolvePrincipal(env, request.headers, options.mcpSession);
   if (!resolution.ok) {
     if (resolution.reason === "invalid_agent") {
       return json({ error: "invalid_agent", message: resolution.message }, 400);

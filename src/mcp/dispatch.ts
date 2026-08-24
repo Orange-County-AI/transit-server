@@ -1,5 +1,7 @@
 import type { HostIdentity, RpcOutcome } from "../do/host-hub";
 import { txId } from "../lib/transit/ids";
+import { listAgents, listRooms } from "../services/directory";
+import { ServiceError } from "../services/errors";
 import { type McpPrincipal, principalAddress } from "./principal";
 
 /** A tool's answer, in the two shapes `tools/call` can render. */
@@ -26,17 +28,39 @@ function optional(args: Record<string, unknown>, key: string): string | undefine
   return value || undefined;
 }
 
+/**
+ * The host a principal acts on. A signed-in person has none — they hold an
+ * organization, not an address — so every tool that reaches a HostHub stops
+ * here rather than inventing one. Giving a human an agent-shaped address is a
+ * real decision about a public namespace, not something to infer.
+ */
 function identityOf(principal: McpPrincipal): HostIdentity {
+  if (!principal.host || !principal.hostId) {
+    fail(
+      "this tool acts from a host, and this credential is not bound to one; " +
+        "a signed-in person is not yet a Transit participant",
+    );
+  }
   return { hostId: principal.hostId, org: principal.org, slug: principal.host };
 }
 
 /**
- * The acting agent, for the tools that act as somebody rather than merely
- * read. A host-scoped credential does not name one on its own, so the failure
- * has to say how to supply it — an agent that reads "unauthorized" here will
- * conclude its token is wrong and stop.
+ * The acting agent, for the tools that act as somebody rather than merely read.
+ *
+ * Two different things can be missing and they need different answers. A
+ * credential bound to no host at all is a signed-in person, and no header will
+ * fix that — the address does not exist yet. A host-scoped credential that
+ * simply did not say who it is can fix it, and must be told how: an agent that
+ * reads "unauthorized" here will conclude its token is wrong and stop.
  */
 function actor(principal: McpPrincipal): string {
+  if (!principal.host) {
+    fail(
+      "this tool acts as an agent, and this credential is not bound to a host; " +
+        "a signed-in person is not yet a Transit participant and has no address " +
+        "to act from",
+    );
+  }
   const address = principalAddress(principal);
   if (!address) {
     fail(
@@ -48,7 +72,11 @@ function actor(principal: McpPrincipal): string {
 }
 
 function hub(env: Env, principal: McpPrincipal) {
-  return env.HOST_HUB.getByName(`org:${principal.org}:host:${principal.host}`);
+  // Through `identityOf` rather than reading `principal.host` directly: a null
+  // host interpolated into a Durable Object name addresses an object literally
+  // called `null`, which exists, answers, and is wrong.
+  const identity = identityOf(principal);
+  return env.HOST_HUB.getByName(`org:${identity.org}:host:${identity.slug}`);
 }
 
 async function rpc(
@@ -75,10 +103,13 @@ export async function callTool(
   try {
     return { text: await runTool(env, principal, name, args) };
   } catch (error) {
-    return {
-      text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-      isError: true,
-    };
+    // A ServiceError's message is the sentence a tool result carries; see
+    // `services/errors.ts`.
+    const message =
+      error instanceof ServiceError || error instanceof Error
+        ? error.message
+        : String(error);
+    return { text: `Error: ${message}`, isError: true };
   }
 }
 
@@ -139,23 +170,27 @@ async function runTool(
           caller: actor(principal),
         }),
       );
+    // These two only observe, so they read the directory service directly
+    // rather than through a HostHub. That is not an optimisation: a signed-in
+    // person has an organization and no host, and routing an org-scoped
+    // question through a host-scoped object would put them behind a door they
+    // have no key for. The daemon wire still reaches the same service through
+    // `invokeRpc`; `test/directory-service.test.ts` is what holds them equal.
     case "list_agents":
       return JSON.stringify(
-        await rpc(env, principal, "list_agents", {
-          ...(optional(args, "host") ? { host: args.host as string } : {}),
-          ...(optional(args, "organization")
-            ? { organization: args.organization as string }
-            : {}),
+        await listAgents(env.DB, {
+          org: principal.org,
+          host: optional(args, "host") ?? null,
+          organization: optional(args, "organization") ?? null,
         }),
         null,
         2,
       );
     case "list_rooms":
       return JSON.stringify(
-        await rpc(env, principal, "list_rooms", {
-          ...(optional(args, "organization")
-            ? { organization: args.organization as string }
-            : {}),
+        await listRooms(env.DB, {
+          org: principal.org,
+          organization: optional(args, "organization") ?? null,
         }),
         null,
         2,
@@ -177,6 +212,13 @@ async function runTool(
       return `${name} ${room}`;
     }
     case "whoami": {
+      // A signed-in person holds an organization and no address. Saying that
+      // plainly beats both an error, which reads as a broken credential, and a
+      // fabricated address, which would be the phase-5 decision made by
+      // accident.
+      if (!principal.host) {
+        return `signed-in person (organization ${principal.org}); not yet a Transit participant, so this credential has no address to act from`;
+      }
       const status = await hub(env, principal).status();
       const address = principalAddress(principal);
       return `${address ?? `(unnamed)@${principal.host}`} (connected: ${status.connected})`;

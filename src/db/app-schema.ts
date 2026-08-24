@@ -45,10 +45,10 @@ export const host = sqliteTable(
  * its agent clients with it. Several rows may name one agent, which is what
  * rotating a secret without an outage looks like.
  *
- * `scopes` is stored and carried into the token, and NOTHING ENFORCES IT TODAY.
- * It is space-separated, empty by default, and a token request cannot ask for
- * more than its row was granted. Treat it as reserved, not as a restriction
- * that holds.
+ * There is deliberately no `scopes` column. Nothing enforces a scope anywhere
+ * in Transit, and a column named `scopes` is read as a permission boundary by
+ * whoever arrives next however carefully its absence of meaning is documented.
+ * It goes in when enforcement exists to give it one.
  */
 export const agentClient = sqliteTable(
   "agent_client",
@@ -58,7 +58,6 @@ export const agentClient = sqliteTable(
     host: text("host").notNull(),
     name: text("name").notNull(),
     secretHash: text("secret_hash").notNull(),
-    scopes: text("scopes").notNull().default(""),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
     revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),

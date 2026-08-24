@@ -56,6 +56,13 @@ import {
   organizationPair,
   resolveConnectedOrganization,
 } from "./lib/transit/organizations";
+import {
+  AUTHORIZATION_SERVER_PATH,
+  PROTECTED_RESOURCE_PATH,
+  authorizationServerMetadata,
+  bearerChallenge,
+  protectedResourceMetadata,
+} from "./mcp/discovery";
 import { handleMcp } from "./mcp/http";
 import { handleTokenRequest } from "./mcp/oauth";
 import {
@@ -317,9 +324,32 @@ app.get("/SKILL.md", () => {
  */
 app.all("/mcp", (context) =>
   handleMcp(context.env, context.req.raw, {
-    challenge: () => 'Bearer realm="transit"',
+    challenge: (request) => bearerChallenge(context.env, request),
+    mcpSession: async (headers) => {
+      // An `mcp` access token is opaque and looked up, not verified. Better
+      // Auth answers `null` for anything it does not recognize rather than
+      // throwing, which is also what an unrelated bearer looks like here.
+      const session = await authFor(context).api.getMcpSession({ headers });
+      return session?.userId ? { userId: session.userId, scopes: session.scopes } : null;
+    },
   }),
 );
+
+/**
+ * Discovery. Root-mounted because that is where a connector probes, and
+ * authored here rather than taken from the Better Auth plugin, which points at
+ * endpoints it does not mount and calls the origin the resource. See
+ * `src/mcp/discovery.ts`; `test/mcp-discovery.test.ts` fetches everything these
+ * advertise and fails if any of it 404s.
+ */
+app.get(PROTECTED_RESOURCE_PATH, (context) => {
+  context.header("Cache-Control", "public, max-age=300");
+  return context.json(protectedResourceMetadata(context.env, context.req.raw));
+});
+app.get(AUTHORIZATION_SERVER_PATH, (context) => {
+  context.header("Cache-Control", "public, max-age=300");
+  return context.json(authorizationServerMetadata(context.env, context.req.raw));
+});
 
 /**
  * Agent access tokens, `grant_type=client_credentials`. Beside Better Auth
@@ -327,11 +357,33 @@ app.all("/mcp", (context) =>
  */
 app.all("/oauth/token", (context) => handleTokenRequest(context.env, context.req.raw));
 
+/**
+ * The registered name behind a `client_id`, for the consent screen.
+ *
+ * Better Auth's oidc-provider has this endpoint but the `mcp` plugin does not
+ * re-export it, so it is not mounted anywhere. Without it the consent screen
+ * asks a person to approve a 32-character random string, which is not consent —
+ * they cannot tell what they are agreeing to.
+ */
+app.get("/api/oauth-clients/:clientId", async (context) => {
+  const session = await authFor(context).api.getSession({
+    headers: context.req.raw.headers,
+  });
+  if (!session) return context.json({ error: "Unauthorized" }, 401);
+  const row = await context.env.DB.prepare(
+    "SELECT client_id, name, icon FROM oauth_application WHERE client_id = ? AND disabled = 0 LIMIT 1",
+  )
+    .bind(context.req.param("clientId"))
+    .first<{ client_id: string; name: string | null; icon: string | null }>();
+  if (!row) return context.json({ error: "client_not_found" }, 404);
+  return context.json({ client_id: row.client_id, name: row.name, icon: row.icon });
+});
+
 app.get("/api/agent-clients", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
   const rows = await context.env.DB.prepare(
-    `SELECT client_id, host, name, scopes, created_at, last_used_at,
+    `SELECT client_id, host, name, created_at, last_used_at,
             substr(secret_hash, 1, 8) AS secret_fingerprint
      FROM agent_client
      WHERE org_id = ? AND revoked_at IS NULL
@@ -346,7 +398,7 @@ app.post("/api/agent-clients", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
   const body = await context.req
-    .json<{ host?: unknown; name?: unknown; scopes?: unknown }>()
+    .json<{ host?: unknown; name?: unknown }>()
     .catch(() => null);
   if (!body || typeof body.host !== "string" || typeof body.name !== "string") {
     return context.json({ error: "host and name are required" }, 400);
@@ -358,10 +410,6 @@ app.post("/api/agent-clients", async (context) => {
     const code = error instanceof AddressError ? error.code : "invalid_name";
     return context.json({ error: code }, 400);
   }
-  if (body.scopes !== undefined && typeof body.scopes !== "string") {
-    return context.json({ error: "scopes must be a string" }, 400);
-  }
-
   // The agent's address has to be real, and a revoked host must not keep
   // issuing identities on a slug nothing serves.
   const hostRow = await context.env.DB.prepare(
@@ -375,8 +423,8 @@ app.post("/api/agent-clients", async (context) => {
   const secret = agentClientSecret();
   await context.env.DB.prepare(
     `INSERT INTO agent_client
-     (client_id, org_id, host, name, secret_hash, scopes, created_at, last_used_at, revoked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+     (client_id, org_id, host, name, secret_hash, created_at, last_used_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
   )
     .bind(
       clientId,
@@ -384,7 +432,6 @@ app.post("/api/agent-clients", async (context) => {
       body.host,
       body.name,
       await sha256hex(secret),
-      typeof body.scopes === "string" ? body.scopes : "",
       Date.now(),
     )
     .run();

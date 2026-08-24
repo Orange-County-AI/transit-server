@@ -10,9 +10,14 @@ import { agentTokenSubject } from "./agent-token";
  */
 export type McpPrincipal = {
   org: string;
-  /** Host slug. Durable Object names are `org:<org>:host:<host>`. */
-  host: string;
-  hostId: string;
+  /**
+   * Host slug, or null for a principal that is not on a host at all — today
+   * that means a signed-in person. Durable Object names are
+   * `org:<org>:host:<host>`, so a null host is a principal that cannot reach a
+   * HostHub and therefore cannot act as an agent.
+   */
+  host: string | null;
+  hostId: string | null;
   /**
    * The acting agent's name, or null when nothing named one.
    *
@@ -23,11 +28,28 @@ export type McpPrincipal = {
    * cannot be overridden; see {@link resolvePrincipal}.
    */
   name: string | null;
-  credential: "device_token" | "agent_client";
-  /** Present only for an agent client. Reserved: nothing enforces scope yet. */
+  credential: "device_token" | "agent_client" | "user_session";
+  /** Present only for an agent client. */
   clientId?: string;
+  /**
+   * The scopes a person's OAuth grant carries, verbatim from Better Auth.
+   * Recorded, never consulted: nothing in Transit enforces a scope, and an
+   * agent credential deliberately carries none at all.
+   */
   scope?: string;
+  /** Present only for a signed-in person. */
+  userId?: string;
 };
+
+/**
+ * Reads a Better Auth `mcp` access token, which is opaque and looked up in the
+ * database rather than verified. Supplied by the caller because it needs the
+ * Better Auth instance, and that is assembled from deployment-supplied plugins
+ * the `src/mcp/` modules deliberately know nothing about.
+ */
+export type McpSessionReader = (
+  headers: Headers,
+) => Promise<{ userId: string; scopes?: string | null } | null>;
 
 export type PrincipalResolution =
   | { ok: true; principal: McpPrincipal }
@@ -50,15 +72,56 @@ export function bearerToken(headers: Headers): string | null {
 export async function resolvePrincipal(
   env: Env,
   headers: Headers,
+  mcpSession?: McpSessionReader,
 ): Promise<PrincipalResolution> {
   const token = bearerToken(headers);
   if (!token) return UNAUTHORIZED;
   // A device token is base64url of 32 random bytes and never contains a dot, so
   // the shape picks the path without either verifier seeing the other's input.
   // A malformed agent token does NOT fall through to the device-token lookup.
-  return looksLikeJwt(token)
-    ? resolveAgentClient(env, token)
-    : resolveDeviceToken(env, token, headers);
+  if (looksLikeJwt(token)) return resolveAgentClient(env, token);
+
+  const device = await resolveDeviceToken(env, token, headers);
+  if (device.ok || device.reason === "invalid_agent") return device;
+  // A Better Auth access token is also dot-free, so it can only be told from a
+  // device token by asking. Tried second, and only on a miss, so the common
+  // case stays one query.
+  return mcpSession ? resolveUserSession(env, headers, mcpSession) : UNAUTHORIZED;
+}
+
+/**
+ * A signed-in person, reached through the authorization-code flow Claude
+ * performs. They have an organization and no address: `host` and `name` are
+ * null, so every tool that acts AS an agent refuses with a message saying so,
+ * and the ones that only observe work.
+ */
+async function resolveUserSession(
+  env: Env,
+  headers: Headers,
+  mcpSession: McpSessionReader,
+): Promise<PrincipalResolution> {
+  const session = await mcpSession(headers);
+  if (!session) return UNAUTHORIZED;
+  // Scoped exactly as a browser session is: the membership row is what makes an
+  // organization theirs, not a claim in a token.
+  const membership = await env.DB.prepare(
+    "SELECT organization_id FROM member WHERE user_id = ? ORDER BY created_at LIMIT 1",
+  )
+    .bind(session.userId)
+    .first<{ organization_id: string }>();
+  if (!membership) return UNAUTHORIZED;
+  return {
+    ok: true,
+    principal: {
+      org: membership.organization_id,
+      host: null,
+      hostId: null,
+      name: null,
+      credential: "user_session",
+      userId: session.userId,
+      ...(session.scopes ? { scope: session.scopes } : {}),
+    },
+  };
 }
 
 /**
@@ -84,20 +147,14 @@ async function resolveAgentClient(
   // at the token's expiry. The host join is why revoking a host revokes its
   // agent clients too.
   const row = await env.DB.prepare(
-    `SELECT c.org_id, c.host, c.name, c.scopes, h.id AS host_id
+    `SELECT c.org_id, c.host, c.name, h.id AS host_id
      FROM agent_client c
      JOIN host h ON h.org_id = c.org_id AND h.slug = c.host
      WHERE c.client_id = ? AND c.revoked_at IS NULL AND h.revoked_at IS NULL
      LIMIT 1`,
   )
     .bind(clientId)
-    .first<{
-      org_id: string;
-      host: string;
-      name: string;
-      scopes: string;
-      host_id: string;
-    }>();
+    .first<{ org_id: string; host: string; name: string; host_id: string }>();
   if (!row) return UNAUTHORIZED;
 
   return {
@@ -109,7 +166,6 @@ async function resolveAgentClient(
       name: row.name,
       credential: "agent_client",
       clientId,
-      scope: row.scopes,
     },
   };
 }
@@ -157,5 +213,7 @@ async function resolveDeviceToken(
 
 /** `name@host` for a principal that named an agent. */
 export function principalAddress(principal: McpPrincipal): string | null {
-  return principal.name ? formatAgentAddress(principal.name, principal.host) : null;
+  return principal.name && principal.host
+    ? formatAgentAddress(principal.name, principal.host)
+    : null;
 }

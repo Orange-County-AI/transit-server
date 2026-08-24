@@ -60,10 +60,6 @@ function basicCredentials(headers: Headers): ClientCredentials | null {
   }
 }
 
-function scopeSet(scopes: string): Set<string> {
-  return new Set(scopes.split(" ").filter(Boolean));
-}
-
 export async function handleTokenRequest(env: Env, request: Request): Promise<Response> {
   if (request.method !== "POST") {
     return tokenError("invalid_request", "the token endpoint takes POST", 405, {
@@ -110,7 +106,7 @@ export async function handleTokenRequest(env: Env, request: Request): Promise<Re
   // row for a wrong secret — the same discipline `host.token_hash` uses. The
   // host join is what makes revoking a host revoke its agent clients.
   const row = await env.DB.prepare(
-    `SELECT c.client_id, c.org_id, c.host, c.name, c.scopes
+    `SELECT c.client_id, c.org_id, c.host, c.name
      FROM agent_client c
      JOIN host h ON h.org_id = c.org_id AND h.slug = c.host
      WHERE c.client_id = ? AND c.secret_hash = ?
@@ -118,28 +114,19 @@ export async function handleTokenRequest(env: Env, request: Request): Promise<Re
      LIMIT 1`,
   )
     .bind(credentials.clientId, await sha256hex(credentials.secret))
-    .first<{
-      client_id: string;
-      org_id: string;
-      host: string;
-      name: string;
-      scopes: string;
-    }>();
+    .first<{ client_id: string; org_id: string; host: string; name: string }>();
   if (!row) {
     return tokenError("invalid_client", "client authentication failed", 401);
   }
 
-  // A request may narrow what its row was granted; it may never widen it.
-  // Nothing enforces scope on the tool surface yet — see `agent_client`.
-  let scope = row.scopes;
-  const requested = form.get("scope");
-  if (requested !== null) {
-    const granted = scopeSet(row.scopes);
-    const asked = [...scopeSet(requested)];
-    if (asked.some((entry) => !granted.has(entry))) {
-      return tokenError("invalid_scope", "requested scope exceeds this client's grant");
-    }
-    scope = asked.join(" ");
+  // No scope is granted, because nothing in Transit enforces one. Asking for
+  // any is refused outright rather than answered with a token whose `scope`
+  // claim would describe a restriction that does not exist.
+  if (form.get("scope")) {
+    return tokenError(
+      "invalid_scope",
+      "this server grants no scopes; omit the scope parameter",
+    );
   }
 
   const minted = await mintAgentToken(env, {
@@ -147,7 +134,6 @@ export async function handleTokenRequest(env: Env, request: Request): Promise<Re
     org: row.org_id,
     host: row.host,
     name: row.name,
-    scope,
   });
 
   await env.DB.prepare("UPDATE agent_client SET last_used_at = ? WHERE client_id = ?")
@@ -159,7 +145,6 @@ export async function handleTokenRequest(env: Env, request: Request): Promise<Re
       access_token: minted.token,
       token_type: "Bearer",
       expires_in: minted.expiresIn,
-      ...(scope ? { scope } : {}),
     }),
     {
       headers: {

@@ -207,7 +207,6 @@ describe("agent client credentials", () => {
       org: beta.org,
       host: "alpha",
       name: "impostor",
-      scope: "",
     });
 
     const listed = await SELF.fetch(`${ORIGIN}/mcp`, {
@@ -228,7 +227,7 @@ describe("agent client credentials", () => {
     expect(await whoami(forged.token)).toBe("scout@alpha (connected: false)");
   });
 
-  it("refuses a bad secret, a wrong grant, and an over-wide scope", async () => {
+  it("refuses a bad secret, a wrong grant, a scope request, and a tampered token", async () => {
     const cookie = await signUp("agent-client-errors@test.example");
     await enrollHost(cookie, "alpha");
     const client = await createClient(cookie, "alpha", "scout");
@@ -254,17 +253,29 @@ describe("agent client credentials", () => {
       error: "unsupported_grant_type",
     });
 
-    // The row grants no scope, so nothing may be asked for.
-    const overWide = await tokenRequest({
+    // Nothing in Transit enforces a scope, so asking for one is refused rather
+    // than answered with a token whose `scope` claim describes a restriction
+    // that does not exist.
+    const scoped = await tokenRequest({
       grant_type: "client_credentials",
       client_id: client.client_id,
       client_secret: client.client_secret,
       scope: "rooms:write",
     });
-    expect(overWide.status).toBe(400);
-    expect(await overWide.json<{ error: string }>()).toMatchObject({
+    expect(scoped.status).toBe(400);
+    expect(await scoped.json<{ error: string }>()).toMatchObject({
       error: "invalid_scope",
     });
+
+    // And a token that WAS issued carries no scope claim at all.
+    const issued = await accessToken(client);
+    const issuedClaims = JSON.parse(
+      atob(issued.split(".")[1]!.replaceAll("-", "+").replaceAll("_", "/")),
+    ) as Record<string, unknown>;
+    expect(
+      issuedClaims.scope,
+      "no scope is granted, so none may be claimed",
+    ).toBeUndefined();
 
     // A token whose claims were edited after signing. The signature is the only
     // thing standing between "this client says so" and "anyone says so".

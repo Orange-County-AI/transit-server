@@ -37,7 +37,6 @@ export type AgentTokenGrant = {
   org: string;
   host: string;
   name: string;
-  scope: string;
 };
 
 export async function mintAgentToken(
@@ -53,7 +52,6 @@ export async function mintAgentToken(
     org: grant.org,
     host: grant.host,
     name: grant.name,
-    ...(grant.scope ? { scope: grant.scope } : {}),
     iat: issuedAt,
     exp: issuedAt + AGENT_TOKEN_TTL_SECONDS,
   };
