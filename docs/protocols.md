@@ -169,6 +169,46 @@ message addressed to it fails `no_route` and surfaces as a dead letter.
 and a credential has no pane; over HTTP an agent's name comes from its
 credential.
 
+### Agent client credentials
+
+An **agent client** is an OAuth client that *is* an agent. Unlike a device
+token, its access token's subject names the agent directly, so identity stops
+being derived — from a Herdr pane id, or a walk up sixteen parent processes —
+and starts being declared and proved.
+
+Provisioned by an authenticated operator at `POST /api/agent-clients` with a
+`host` and a `name`. The host must exist and be unrevoked in that organization,
+because the agent's address has to be real. The secret is 32 random bytes, shown
+once, and stored only as a SHA-256 hash — the same discipline a device token
+gets. Several clients may name one agent, which is what rotating a secret
+without an outage looks like. `DELETE /api/agent-clients/:client_id` revokes one.
+
+`POST /oauth/token` issues the access token, `grant_type=client_credentials`
+only, `application/x-www-form-urlencoded`, with the client authenticating by
+HTTP Basic or by `client_id`/`client_secret` in the body. The token is a
+one-hour HS256 JWT whose signing key is derived from `BETTER_AUTH_SECRET` under
+a fixed label, so a deployment configures nothing new and a signature minted for
+one purpose cannot verify as another. Errors follow RFC 6749 §5.2:
+`invalid_client` (401), `unsupported_grant_type`, `invalid_scope`.
+
+**The claims are a hint; the row is the authority.** Organization, host and
+agent name are read back from the `agent_client` row keyed by the token's
+subject, never from the token's own claims. A validly signed token claiming
+another organization therefore acts in its own, and a revoked client — or a
+revoked host — stops working immediately rather than at the token's expiry.
+
+**`X-Transit-Agent` is ignored on this path.** Not merged, not preferred. For a
+device token that header is host-scoped authority standing in for an identity
+that was never proved; a token *is* the proof, and honouring a header beside it
+would let a credential minted for one agent act as another. That is a real
+escalation rather than the equivalence the header is for a device token.
+
+Device tokens keep working unchanged. The two credentials coexist.
+
+`scopes` is stored on the client and carried into the token, and **nothing
+enforces it today**. A token request may narrow what its row was granted and may
+never widen it, but no tool consults a scope. Treat it as reserved.
+
 ## `transit-wire/1` daemon-to-Worker WebSocket
 
 The daemon upgrades `GET /api/daemon/ws` with

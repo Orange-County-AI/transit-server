@@ -32,6 +32,43 @@ export const host = sqliteTable(
   ],
 );
 
+/**
+ * An OAuth client that IS an agent.
+ *
+ * A device token proves a host and says nothing about who is acting on it; this
+ * says exactly who. The subject of the token minted from it is the agent, which
+ * is what lets identity stop being derived from a Herdr pane id or a PPID walk
+ * and start being declared and proved.
+ *
+ * `host` and `name` are the agent's address, and `host` names a `host` row in
+ * the same organization rather than a free string: revoking a host must take
+ * its agent clients with it. Several rows may name one agent, which is what
+ * rotating a secret without an outage looks like.
+ *
+ * `scopes` is stored and carried into the token, and NOTHING ENFORCES IT TODAY.
+ * It is space-separated, empty by default, and a token request cannot ask for
+ * more than its row was granted. Treat it as reserved, not as a restriction
+ * that holds.
+ */
+export const agentClient = sqliteTable(
+  "agent_client",
+  {
+    clientId: text("client_id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    host: text("host").notNull(),
+    name: text("name").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    scopes: text("scopes").notNull().default(""),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
+    revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
+  },
+  (table) => [
+    uniqueIndex("agent_client_secret_hash_unique").on(table.secretHash),
+    index("agent_client_org_revoked_idx").on(table.orgId, table.revokedAt),
+  ],
+);
+
 export const enrollCode = sqliteTable(
   "enroll_code",
   {

@@ -19,6 +19,7 @@ export const dlvId = (): string => prefixedId("dlv");
 export const hostId = (): string => prefixedId("hst");
 export const intId = (): string => prefixedId("int");
 export const eventId = (): string => prefixedId("evt");
+export const agentClientId = (): string => prefixedId("agc");
 function randomToken(): string {
   const binary = String.fromCharCode(...randomBytes(32));
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
@@ -26,6 +27,8 @@ function randomToken(): string {
 
 export const deviceToken = (): string => randomToken();
 export const sourceSecret = (): string => randomToken();
+/** An agent client's secret. Same 32 random bytes a device token gets. */
+export const agentClientSecret = (): string => randomToken();
 
 
 export function enrollCode(): string {

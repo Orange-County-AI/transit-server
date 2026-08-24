@@ -21,13 +21,22 @@ import { type AuthPluginFactory, auth, noAuthPlugins } from "./lib/better-auth";
 
 import {
   AddressError,
+  formatAgentAddress,
   parseAddress,
   validateHost,
   validateName,
   validateOrganizationSlug,
 } from "./lib/transit/addr";
 import { hmacVerify, openSecret, sealSecret, sha256hex } from "./lib/transit/crypto";
-import { deviceToken, enrollCode, hostId, intId, sourceSecret } from "./lib/transit/ids";
+import {
+  agentClientId,
+  agentClientSecret,
+  deviceToken,
+  enrollCode,
+  hostId,
+  intId,
+  sourceSecret,
+} from "./lib/transit/ids";
 import {
   INGEST_TIMESTAMP_SKEW_SECONDS,
   MAX_INGEST_BYTES,
@@ -48,6 +57,7 @@ import {
   resolveConnectedOrganization,
 } from "./lib/transit/organizations";
 import { handleMcp } from "./mcp/http";
+import { handleTokenRequest } from "./mcp/oauth";
 import {
   agentExists,
   integrationForDelivery,
@@ -310,6 +320,100 @@ app.all("/mcp", (context) =>
     challenge: () => 'Bearer realm="transit"',
   }),
 );
+
+/**
+ * Agent access tokens, `grant_type=client_credentials`. Beside Better Auth
+ * rather than inside it; see `src/mcp/oauth.ts` for why that is not a choice.
+ */
+app.all("/oauth/token", (context) => handleTokenRequest(context.env, context.req.raw));
+
+app.get("/api/agent-clients", async (context) => {
+  const org = await sessionOrg(context);
+  if (!org) return context.json({ error: "Unauthorized" }, 401);
+  const rows = await context.env.DB.prepare(
+    `SELECT client_id, host, name, scopes, created_at, last_used_at,
+            substr(secret_hash, 1, 8) AS secret_fingerprint
+     FROM agent_client
+     WHERE org_id = ? AND revoked_at IS NULL
+     ORDER BY host, name, created_at`,
+  )
+    .bind(org)
+    .all();
+  return context.json({ agent_clients: rows.results });
+});
+
+app.post("/api/agent-clients", async (context) => {
+  const org = await sessionOrg(context);
+  if (!org) return context.json({ error: "Unauthorized" }, 401);
+  const body = await context.req
+    .json<{ host?: unknown; name?: unknown; scopes?: unknown }>()
+    .catch(() => null);
+  if (!body || typeof body.host !== "string" || typeof body.name !== "string") {
+    return context.json({ error: "host and name are required" }, 400);
+  }
+  try {
+    validateHost(body.host);
+    validateName(body.name);
+  } catch (error) {
+    const code = error instanceof AddressError ? error.code : "invalid_name";
+    return context.json({ error: code }, 400);
+  }
+  if (body.scopes !== undefined && typeof body.scopes !== "string") {
+    return context.json({ error: "scopes must be a string" }, 400);
+  }
+
+  // The agent's address has to be real, and a revoked host must not keep
+  // issuing identities on a slug nothing serves.
+  const hostRow = await context.env.DB.prepare(
+    "SELECT id FROM host WHERE org_id = ? AND slug = ? AND revoked_at IS NULL LIMIT 1",
+  )
+    .bind(org, body.host)
+    .first<{ id: string }>();
+  if (!hostRow) return context.json({ error: "host_not_found" }, 404);
+
+  const clientId = agentClientId();
+  const secret = agentClientSecret();
+  await context.env.DB.prepare(
+    `INSERT INTO agent_client
+     (client_id, org_id, host, name, secret_hash, scopes, created_at, last_used_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+  )
+    .bind(
+      clientId,
+      org,
+      body.host,
+      body.name,
+      await sha256hex(secret),
+      typeof body.scopes === "string" ? body.scopes : "",
+      Date.now(),
+    )
+    .run();
+
+  // Shown once and stored only as a hash, exactly as a device token is.
+  return context.json(
+    {
+      client_id: clientId,
+      client_secret: secret,
+      address: formatAgentAddress(body.name, body.host),
+      token_endpoint: new URL("/oauth/token", context.req.url).toString(),
+    },
+    201,
+  );
+});
+
+app.delete("/api/agent-clients/:clientId", async (context) => {
+  const org = await sessionOrg(context);
+  if (!org) return context.json({ error: "Unauthorized" }, 401);
+  const result = await context.env.DB.prepare(
+    "UPDATE agent_client SET revoked_at = ? WHERE org_id = ? AND client_id = ? AND revoked_at IS NULL",
+  )
+    .bind(Date.now(), org, context.req.param("clientId"))
+    .run();
+  if (result.meta.changes === 0) {
+    return context.json({ error: "agent_client_not_found" }, 404);
+  }
+  return context.json({ revoked: true, client_id: context.req.param("clientId") });
+});
 
 app.on(["GET", "POST"], "/api/auth/*", (context) => {
   return authFor(context).handler(context.req.raw);
