@@ -21,7 +21,7 @@ export type SendNakCode =
 
 export type DaemonFrame =
   | { t: "hello"; proto: 1; daemon_ver: string; host: string }
-  | { t: "roster"; agents: RosterAgent[] }
+  | { t: "roster"; agents: RosterAgent[]; dead?: number }
   | { t: "send"; id: string; from: string; to: string; body: string; reply_to?: string; ts: string }
   // `agent` echoes the recipient of the `deliver` frame being settled so the
   // Worker can keep delivery bookkeeping per recipient. An older daemon omits
@@ -156,13 +156,27 @@ export function decodeDaemonFrame(raw: string): DaemonFrame | null {
       // of none - not a malformed frame. Rejecting it closed the whole host
       // connection with 4002 the moment its last agent exited, which stranded a
       // workspace whose only session had not been restarted yet.
+      // `dead` is a report, not an instruction: a daemon too old to send it,
+      // or one that sent nonsense, must not cost this host its connection. An
+      // unusable value degrades to "not reported" the same way an unknown
+      // provenance degrades to a label.
+      const dead =
+        typeof frame.dead === "number" &&
+        Number.isInteger(frame.dead) &&
+        frame.dead >= 0
+          ? frame.dead
+          : undefined;
       if (frame.agents === undefined || frame.agents === null) {
-        return { t: "roster", agents: [] };
+        return { t: "roster", agents: [], ...(dead === undefined ? {} : { dead }) };
       }
       if (!Array.isArray(frame.agents)) {
         throw new WireError("agents must be an array", "invalid_frame");
       }
-      return { t: "roster", agents: frame.agents.map(rosterAgent) };
+      return {
+        t: "roster",
+        agents: frame.agents.map(rosterAgent),
+        ...(dead === undefined ? {} : { dead }),
+      };
     }
     case "send": {
       const replyTo = optionalStringField(frame, "reply_to");

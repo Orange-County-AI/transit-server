@@ -672,7 +672,14 @@ app.get("/api/hosts", async (context) => {
       const state = await context.env.HOST_HUB.getByName(
         `org:${org}:host:${row.slug}`,
       ).status();
-      return { ...row, connected: Boolean(state.connected), queue_depth: state.queueDepth };
+      return {
+        ...row,
+        connected: Boolean(state.connected),
+        queue_depth: state.queueDepth,
+        // Null distinguishes "this daemon has not reported" from "none", so an
+        // old daemon cannot read as a clean box.
+        spooled_dead: state.spooledDead ?? null,
+      };
     }),
   );
   return context.json({ hosts });

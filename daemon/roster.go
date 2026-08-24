@@ -226,7 +226,15 @@ func (d *Daemon) sendRoster(ctx context.Context, e *enrollmentRuntime) error {
 	d.mu.RLock()
 	agents := append([]WireAgent(nil), d.roster[e.id]...)
 	d.mu.RUnlock()
-	return connection.write(ctx, WireFrame{T: "roster", Agents: &agents})
+	// A dead letter is only visible on the box that spooled it, so the roster
+	// carries the count: it is the number that makes an operator go look. A
+	// counting failure omits the field rather than failing the roster, since a
+	// roster that does not publish costs the host its whole agent list.
+	frame := WireFrame{T: "roster", Agents: &agents}
+	if _, dead, err := e.store.Counts(); err == nil {
+		frame.Dead = &dead
+	}
+	return connection.write(ctx, frame)
 }
 
 // sendRosters publishes to every connected enrollment. An offline one is not

@@ -40,15 +40,21 @@ type WireFrame struct {
 	// rejected the frame and closed 4002, and the host lost its connection the
 	// moment its last agent exited. The frame is shared by every type, so the
 	// pointer is what keeps `agents` off a deliver or ack frame.
-	Agents   *[]WireAgent `json:"agents,omitempty"`
-	ID       string       `json:"id,omitempty"`
-	From     string       `json:"from,omitempty"`
-	To       string       `json:"to,omitempty"`
-	Body     string       `json:"body,omitempty"`
-	ReplyTo  string       `json:"reply_to,omitempty"`
-	TS       string       `json:"ts,omitempty"`
-	Agent    string       `json:"agent,omitempty"`
-	Envelope string       `json:"envelope,omitempty"`
+	Agents *[]WireAgent `json:"agents,omitempty"`
+	// Dead letters spooled on this box for this enrollment. A pointer for the
+	// same reason as Agents, and more sharply: zero is the answer that matters
+	// most, and `omitempty` on an int would drop exactly the healthy report
+	// while sending every unhealthy one. Set on `roster`; omitted by any daemon
+	// older than it, which the Worker reads as "not reported" rather than none.
+	Dead     *int   `json:"dead,omitempty"`
+	ID       string `json:"id,omitempty"`
+	From     string `json:"from,omitempty"`
+	To       string `json:"to,omitempty"`
+	Body     string `json:"body,omitempty"`
+	ReplyTo  string `json:"reply_to,omitempty"`
+	TS       string `json:"ts,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Envelope string `json:"envelope,omitempty"`
 	// Via reports which transport carried a delivery to its agent. Set only on
 	// `deliver_ack`; omitted everywhere else, and by any daemon older than it.
 	Via       string          `json:"via,omitempty"`

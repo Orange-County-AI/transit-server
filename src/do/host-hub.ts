@@ -50,6 +50,8 @@ export type HostHubStatus = {
   agents: RosterAgent[];
   queueDepth: number;
   budgetExhausted: AlarmBudgetStatus | null;
+  // Absent when the daemon has not reported one; see status().
+  spooledDead?: number;
 };
 
 type DaemonAttachment = HostIdentity & {
@@ -313,11 +315,17 @@ export class HostHub extends DurableObject<Env> {
   async status(): Promise<HostHubStatus> {
     const roster = await this.ctx.storage.list<RosterAgent>({ prefix: "roster:" });
     const queued = await this.ctx.storage.list<QueuedDelivery>({ prefix: "q:" });
+    // Dead letters the daemon spooled locally, which exist nowhere else: a send
+    // that dies in a sender's outbox never reaches the ledger. Undefined means
+    // this daemon has not reported, which is not the same as none and must not
+    // render as a reassuring zero.
+    const spooledDead = await this.ctx.storage.get<number>("spooledDead");
     return {
       connected: this.daemonSocket() !== null,
       agents: [...roster.values()],
       queueDepth: queued.size,
       budgetExhausted: await alarmBudgetStatus(this.ctx.storage),
+      ...(spooledDead === undefined ? {} : { spooledDead }),
     };
   }
 
@@ -370,6 +378,9 @@ export class HostHub extends DurableObject<Env> {
     switch (frame.t) {
       case "roster":
         await this.applyRoster(attachment, frame.agents);
+        if (frame.dead !== undefined) {
+          await this.ctx.storage.put("spooledDead", frame.dead);
+        }
         break;
       case "send":
         await this.handleSend(socket, attachment, frame);
