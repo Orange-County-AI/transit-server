@@ -11,7 +11,8 @@ interface Env {
   BETTER_AUTH_SECRET: string;
   TRANSIT_MASTER_KEY: string;
   BETTER_AUTH_TRUSTED_ORIGINS?: string;
-
+  /** Where /dl redirects. Unset falls through to the published release. */
+  TRANSIT_DOWNLOAD_BASE?: string;
 }
 
 declare namespace Cloudflare {
@@ -19,6 +20,12 @@ declare namespace Cloudflare {
     BETTER_AUTH_SECRET: string;
     TRANSIT_MASTER_KEY: string;
     BETTER_AUTH_TRUSTED_ORIGINS?: string;
-
+    TRANSIT_DOWNLOAD_BASE?: string;
   }
+}
+
+/** The installer is shipped as a file and served verbatim; see /install. */
+declare module "*.sh" {
+  const content: string;
+  export default content;
 }

@@ -10,7 +10,19 @@ The slug becomes part of every agent address on that host: `name@host`.
 
 ## Install Transit on the host
 
-Every host needs the `transit` daemon. How you install it depends on whether the host runs Herdr.
+Every host needs the `transit` daemon. The installer is the shortest path; the other two exist for hosts that want the Herdr plugin as well, or that build everything from source.
+
+### From the installer
+
+```bash
+curl -fsSL https://transit.orangecountyai.com/install | sh
+```
+
+It detects the platform, downloads the matching prebuilt binary, verifies it runs, and installs it to `~/.local/bin/transit`. Override the destination with `TRANSIT_INSTALL_DIR`.
+
+Binaries are published for Linux and macOS on amd64 and arm64. The download is served from the same origin the script was fetched from, so a self-hosted Worker hands out its own build without the script being edited; `TRANSIT_DOWNLOAD_BASE` on that Worker points `/dl` at wherever you keep them.
+
+Anything else — a platform with no published binary, or a policy against piping to a shell — takes one of the two paths below.
 
 ### On a Herdr host
 
@@ -52,7 +64,21 @@ Supervise the daemon yourself in that case; see [Run the daemon without a Herdr 
 
 ## Enroll a host
 
-For the hosted service:
+```bash
+transit enroll
+```
+
+The daemon opens an enrollment of its own, prints a link with the code already in it, and polls until somebody approves. Open the link in any browser signed in to your organization, confirm the host's name, and the command returns.
+
+This is a device-authorization flow rather than a browser redirect, because a Transit host is usually a machine you reach over SSH. There is no loopback callback to receive, so the browser does not have to be on the same machine — or the same network — as the host being enrolled.
+
+The daemon suggests its own hostname; the approval screen can rename it before the host is created. Agents are then addressed as `name@<that name>`.
+
+`--url` selects the server, or set `TRANSIT_URL`. Both default to the hosted service.
+
+### Unattended enrollment
+
+For imaging a fleet, or any machine nobody will be watching, issue a code up front and pass it instead:
 
 1. In the dashboard, open **Hosts** and select **Enroll host**.
 2. Enter the **Host slug** and select **Generate code**.
@@ -64,9 +90,9 @@ transit enroll \
   --code XXXX-XXXX
 ```
 
-For a self-hosted server, create the code with authenticated `POST /api/hosts/enroll`, then substitute its origin in `--url`. `TRANSIT_URL` supplies the enrollment default when `--url` is omitted. The [self-hosting guide](self-hosting.md) has a complete cookie-authenticated request.
+For a self-hosted server, create the code with authenticated `POST /api/hosts/enroll`, then substitute its origin in `--url`. The [self-hosting guide](self-hosting.md) has a complete cookie-authenticated request.
 
-The code is single-use and valid for 15 minutes. `transit enroll` exchanges it for a 32-byte device token and writes the host configuration. Neither the hosted service nor a self-hosted server caps how many hosts you enroll.
+Either way the code is single-use and valid for 15 minutes, `transit enroll` exchanges it for a 32-byte device token, and neither the hosted service nor a self-hosted server caps how many hosts you enroll.
 
 ## Local files and credentials
 
