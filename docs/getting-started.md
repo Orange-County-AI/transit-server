@@ -5,8 +5,8 @@ Transit is a durable message mesh for coding agents running on your hosts. You c
 ## What you need
 
 - A Transit account at [transit.orangecountyai.com](https://transit.orangecountyai.com), or a self-hosted Worker. Hosted sign-up creates a personal organization on the free plan; for self-hosting, see [Self-hosting Transit](self-hosting.md).
-- One or more Linux or macOS hosts running coding agents.
-- `go` on each host's `PATH`. The daemon is compiled at install time; there is no published binary release.
+- One or more Linux or macOS hosts running coding agents (amd64 or arm64).
+- Nothing else. The installer downloads a prebuilt binary; a Go toolchain is only needed if you choose to build from source.
 - Install the native adapter for Claude Code, OMP, Pi, or OpenCode. Every other harness delivers through Herdr `agent.prompt` and needs Herdr 0.8.2 or newer with `herdr.service` running.
 
 ## 1. Create your account
@@ -15,26 +15,25 @@ For the hosted service, open [transit.orangecountyai.com](https://transit.orange
 
 ## 2. Install the daemon on the host
 
-On a host that runs Herdr, Transit installs the way every other Herdr plugin does, and the plugin's build step compiles the daemon and puts `transit` on your `PATH`:
-
 ```bash
-herdr plugin install Orange-County-AI/transit-server/daemon/plugin
+curl -fsSL https://transit.orangecountyai.com/install | sh
 ```
 
-Without Herdr, build the daemon from the repository instead:
+The installer detects the platform, downloads the matching binary, and puts `transit` in `~/.local/bin`. Set `TRANSIT_INSTALL_DIR` to put it somewhere else. A self-hosted Worker serves the same installer from its own origin, and that copy downloads from that origin.
 
-```bash
-git clone https://github.com/Orange-County-AI/transit-server.git
-cd transit-server && mise trust && mise install && mise run install
-mise run daemon:build
-install -m 0755 daemon/transit ~/.local/bin/transit
-```
-
-Either way you end up with one `transit` binary. [Hosts and the daemon](hosts.md) covers both paths, supervision, and upgrades.
+Prefer to build it yourself, or on a platform with no published binary? [Hosts and the daemon](hosts.md) covers the Herdr plugin and the from-source path, plus supervision and upgrades.
 
 ## 3. Enroll the host
 
-For the hosted service, use **Hosts** -> **Enroll host** to issue a code. On a self-hosted server, issue it with authenticated `POST /api/hosts/enroll`; the [self-hosting guide](self-hosting.md) includes the request.
+```bash
+transit enroll
+```
+
+The daemon opens an enrollment, prints a link with its code already filled in, and waits. Open the link, confirm the host's name, and the command finishes on its own. Nothing needs to be issued from the dashboard first.
+
+The device token is saved locally and is never shown again. The enrollment expires 15 minutes after it is printed.
+
+For unattended installs — imaging a fleet, or a machine nobody will be watching — issue a code up front instead with **Hosts** -> **Enroll host** (hosted) or authenticated `POST /api/hosts/enroll` (self-hosted), and pass it:
 
 ```bash
 # Use your self-hosted origin here, or export TRANSIT_URL and omit --url.
@@ -42,8 +41,6 @@ transit enroll \
   --url https://transit.orangecountyai.com \
   --code XXXX-XXXX
 ```
-
-The code is single-use and valid for 15 minutes. Enrollment saves the host's device token locally; it is not shown again.
 
 Check that the daemon is connected:
 

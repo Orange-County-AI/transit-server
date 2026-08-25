@@ -1,4 +1,5 @@
 import { type Context, Hono } from "hono";
+import installScript from "../install.sh";
 import skillMarkdown from "../SKILL.md";
 import accountsMarkdown from "../docs/accounts.md";
 import agentSkillMarkdown from "../docs/agent-skill.md";
@@ -211,6 +212,15 @@ const publicDocs = [
 ] as const;
 
 const ENROLL_TTL_MS = 15 * 60 * 1_000;
+/** How often a daemon may poll a device flow. Also what it is told to use. */
+const DEVICE_POLL_INTERVAL_SECONDS = 5;
+/** Platforms the release workflow builds. /dl refuses anything else. */
+const DAEMON_PLATFORMS = new Set([
+  "linux/amd64",
+  "linux/arm64",
+  "darwin/amd64",
+  "darwin/arm64",
+]);
 
 type SessionOrganization = {
   id: string;
@@ -307,6 +317,56 @@ async function targetExists(
     name: parsed.name,
   });
 }
+
+/**
+ * The installer, served from our own origin so the documented command never
+ * points at a third party:
+ *
+ *   curl -fsSL https://transit.orangecountyai.com/install | sh
+ *
+ * `TRANSIT_ORIGIN` is stamped in at serve time rather than baked into the file,
+ * so a self-hosted Worker's installer downloads from that Worker. Cached only
+ * briefly: a bad installer should be fixable by redeploying, not by waiting.
+ */
+app.get("/install", (context) => {
+  let origin: string;
+  try {
+    origin = new URL(context.env.BETTER_AUTH_URL).origin;
+  } catch {
+    origin = new URL(context.req.url).origin;
+  }
+  const script = installScript.replace(
+    'ORIGIN="${TRANSIT_ORIGIN:-https://transit.orangecountyai.com}"',
+    `ORIGIN="\${TRANSIT_ORIGIN:-${origin}}"`,
+  );
+  return new Response(script, {
+    headers: {
+      "Content-Type": "text/x-shellscript; charset=utf-8",
+      "Cache-Control": "public, max-age=300",
+    },
+  });
+});
+
+/**
+ * Redirect to the release asset for a platform. The site owns the URL a person
+ * or a script types; where the bytes actually live is ours to change without
+ * breaking anyone's install command.
+ *
+ * `TRANSIT_DOWNLOAD_BASE` lets a self-hosted deployment point at its own
+ * mirror. Unset, it falls through to the published GitHub release.
+ */
+app.get("/dl/:os/:arch", (context) => {
+  const os = context.req.param("os");
+  const arch = context.req.param("arch");
+  if (!DAEMON_PLATFORMS.has(`${os}/${arch}`)) {
+    return context.json({ error: "unsupported_platform" }, 404);
+  }
+
+  const base =
+    context.env.TRANSIT_DOWNLOAD_BASE?.replace(/\/+$/u, "") ??
+    "https://github.com/Orange-County-AI/transit-server/releases/latest/download";
+  return context.redirect(`${base}/transit_${os}_${arch}`, 302);
+});
 
 app.get("/SKILL.md", () => {
   return new Response(skillMarkdown, {
@@ -813,6 +873,257 @@ app.post("/api/hosts/enroll", async (context) => {
   });
 });
 
+/**
+ * Issue a host its device token, creating or re-arming the host row.
+ *
+ * Shared by both enrollment paths: the pre-issued code and the device flow.
+ * The token is returned once and only its hash is kept, so a caller that fails
+ * to persist what it gets back has to enroll again.
+ */
+async function provisionHost(
+  database: D1Database,
+  org: string,
+  slug: string,
+  daemonVer: string,
+): Promise<{ device_token: string; host_id: string; host: string; org: string }> {
+  const token = deviceToken();
+  const tokenHash = await sha256hex(token);
+  const existing = await database
+    .prepare("SELECT id FROM host WHERE org_id = ? AND slug = ? LIMIT 1")
+    .bind(org, slug)
+    .first<{ id: string }>();
+  const id = existing?.id ?? hostId();
+
+  await database
+    .prepare(
+      `INSERT INTO host
+       (id, org_id, slug, token_hash, token_issued_at, daemon_ver, last_seen_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+       ON CONFLICT(org_id, slug) DO UPDATE SET
+         token_hash = excluded.token_hash,
+         token_issued_at = excluded.token_issued_at,
+         daemon_ver = excluded.daemon_ver,
+         last_seen_at = NULL,
+         revoked_at = NULL`,
+    )
+    .bind(id, org, slug, tokenHash, Date.now(), daemonVer)
+    .run();
+
+  return { device_token: token, host_id: id, host: slug, org };
+}
+
+/**
+ * Start a device-authorization flow. Unauthenticated by design: the daemon has
+ * no credential yet, which is the whole point. What it gets back is a secret
+ * `device_code` to poll with and a short `user_code` for a person to confirm.
+ */
+app.post("/api/device/authorize", async (context) => {
+  const body = await context.req
+    .json<{ hostname?: unknown; daemon_ver?: unknown }>()
+    .catch(() => null);
+  if (
+    !body ||
+    typeof body.daemon_ver !== "string" ||
+    body.daemon_ver.length === 0 ||
+    body.daemon_ver.length > 100 ||
+    typeof body.hostname !== "string" ||
+    body.hostname.length === 0 ||
+    body.hostname.length > 100
+  ) {
+    return context.json({ error: "invalid_request" }, 400);
+  }
+
+  const code = deviceToken();
+  const codeHash = await sha256hex(code);
+  const expiresAt = Date.now() + ENROLL_TTL_MS;
+
+  // A user code collides only against the live rows the sweep has not yet
+  // removed, so a couple of retries is plenty.
+  let userCode = "";
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const candidate = enrollCode();
+    const taken = await context.env.DB.prepare(
+      "SELECT 1 FROM device_authorization WHERE user_code = ? AND expires_at > ? LIMIT 1",
+    )
+      .bind(candidate, Date.now())
+      .first();
+    if (!taken) {
+      userCode = candidate;
+      break;
+    }
+  }
+  if (!userCode) return context.json({ error: "server_error" }, 503);
+
+  await context.env.DB.prepare(
+    `INSERT INTO device_authorization
+     (device_code_hash, user_code, org_id, slug, hostname, daemon_ver, expires_at,
+      approved_at, claimed_at, polled_at)
+     VALUES (?, ?, NULL, NULL, ?, ?, ?, NULL, NULL, NULL)`,
+  )
+    .bind(codeHash, userCode, body.hostname, body.daemon_ver, expiresAt)
+    .run();
+
+  let origin: string;
+  try {
+    origin = new URL(context.env.BETTER_AUTH_URL).origin;
+  } catch {
+    origin = new URL(context.req.url).origin;
+  }
+
+  return context.json({
+    device_code: code,
+    user_code: userCode,
+    verification_uri: `${origin}/activate`,
+    verification_uri_complete: `${origin}/activate?code=${userCode}`,
+    expires_in: Math.floor(ENROLL_TTL_MS / 1000),
+    interval: DEVICE_POLL_INTERVAL_SECONDS,
+  });
+});
+
+/**
+ * Poll for the result of a device flow. Answers in RFC 8628's vocabulary:
+ * `authorization_pending` until a person approves, `slow_down` if the daemon
+ * polls faster than the interval it was given, `expired_token` once the window
+ * closes. The device code is single-use — `claimed_at` closes it the moment a
+ * token is handed over.
+ */
+app.post("/api/device/token", async (context) => {
+  const body = await context.req
+    .json<{ device_code?: unknown }>()
+    .catch(() => null);
+  if (!body || typeof body.device_code !== "string") {
+    return context.json({ error: "invalid_request" }, 400);
+  }
+
+  const codeHash = await sha256hex(body.device_code);
+  const now = Date.now();
+  const row = await context.env.DB.prepare(
+    `SELECT user_code, org_id, slug, daemon_ver, expires_at, approved_at, claimed_at, polled_at
+     FROM device_authorization WHERE device_code_hash = ? LIMIT 1`,
+  )
+    .bind(codeHash)
+    .first<{
+      user_code: string;
+      org_id: string | null;
+      slug: string | null;
+      daemon_ver: string;
+      expires_at: number;
+      approved_at: number | null;
+      claimed_at: number | null;
+      polled_at: number | null;
+    }>();
+
+  // An unknown or already-claimed code is the same answer: nothing to give.
+  if (!row || row.claimed_at !== null) {
+    return context.json({ error: "invalid_grant" }, 400);
+  }
+  if (row.expires_at <= now) {
+    return context.json({ error: "expired_token" }, 400);
+  }
+  if (
+    row.polled_at !== null &&
+    now - row.polled_at < DEVICE_POLL_INTERVAL_SECONDS * 1_000 * 0.8
+  ) {
+    return context.json({ error: "slow_down" }, 429);
+  }
+
+  await context.env.DB.prepare(
+    "UPDATE device_authorization SET polled_at = ? WHERE device_code_hash = ?",
+  )
+    .bind(now, codeHash)
+    .run();
+
+  if (row.approved_at === null || !row.org_id || !row.slug) {
+    return context.json({ error: "authorization_pending" }, 400);
+  }
+
+  // Claim first. If provisioning then fails the flow is spent rather than
+  // replayable, which is the safe direction for a credential-issuing step.
+  const claimed = await context.env.DB.prepare(
+    "UPDATE device_authorization SET claimed_at = ? WHERE device_code_hash = ? AND claimed_at IS NULL RETURNING user_code",
+  )
+    .bind(now, codeHash)
+    .first<{ user_code: string }>();
+  if (!claimed) return context.json({ error: "invalid_grant" }, 400);
+
+  const provisioned = await provisionHost(
+    context.env.DB,
+    row.org_id,
+    row.slug,
+    row.daemon_ver,
+  );
+  return context.json(provisioned);
+});
+
+/**
+ * Approve a pending flow from the browser. Authenticated, so this is where the
+ * flow acquires an organization; the daemon never names one.
+ */
+app.post("/api/device/approve", async (context) => {
+  const org = await sessionOrg(context);
+  if (!org) return context.json({ error: "Unauthorized" }, 401);
+
+  const body = await context.req
+    .json<{ user_code?: unknown; slug?: unknown }>()
+    .catch(() => null);
+  if (!body || typeof body.user_code !== "string") {
+    return context.json({ error: "user_code is required" }, 400);
+  }
+
+  const userCode = body.user_code.trim().toUpperCase();
+  const now = Date.now();
+  const pending = await context.env.DB.prepare(
+    `SELECT device_code_hash, hostname, approved_at FROM device_authorization
+     WHERE user_code = ? AND expires_at > ? AND claimed_at IS NULL LIMIT 1`,
+  )
+    .bind(userCode, now)
+    .first<{ device_code_hash: string; hostname: string; approved_at: number | null }>();
+  if (!pending) return context.json({ error: "unknown_code" }, 404);
+  if (pending.approved_at !== null) {
+    return context.json({ error: "already_approved" }, 409);
+  }
+
+  const slug = typeof body.slug === "string" && body.slug ? body.slug : pending.hostname;
+  try {
+    validateHost(slug);
+  } catch (error) {
+    const code = error instanceof AddressError ? error.code : "invalid_name";
+    return context.json({ error: code }, 400);
+  }
+
+  // Re-enrolling a live host is how a machine is rebuilt or its token rotated,
+  // so an existing slug is allowed here — unlike the pre-issued code path,
+  // which refuses because the operator picked the name before seeing a conflict.
+  await context.env.DB.prepare(
+    "UPDATE device_authorization SET approved_at = ?, org_id = ?, slug = ? WHERE device_code_hash = ?",
+  )
+    .bind(now, org, slug, pending.device_code_hash)
+    .run();
+
+  return context.json({ approved: true, host: slug });
+});
+
+/**
+ * What the browser shows before asking someone to approve. Read-only, and
+ * deliberately unauthenticated-but-useless: it reveals only the hostname the
+ * daemon offered, never an organization.
+ */
+app.get("/api/device/pending/:code", async (context) => {
+  const userCode = context.req.param("code").trim().toUpperCase();
+  const row = await context.env.DB.prepare(
+    `SELECT hostname, daemon_ver, approved_at FROM device_authorization
+     WHERE user_code = ? AND expires_at > ? AND claimed_at IS NULL LIMIT 1`,
+  )
+    .bind(userCode, Date.now())
+    .first<{ hostname: string; daemon_ver: string; approved_at: number | null }>();
+  if (!row) return context.json({ error: "unknown_code" }, 404);
+  return context.json({
+    hostname: row.hostname,
+    daemon_ver: row.daemon_ver,
+    approved: row.approved_at !== null,
+  });
+});
+
 app.post("/api/daemon/enroll", async (context) => {
   const body = await context.req
     .json<{ code?: unknown; daemon_ver?: unknown }>()
@@ -839,30 +1150,18 @@ app.post("/api/daemon/enroll", async (context) => {
     .first<{ org_id: string; slug: string }>();
   if (!enrollment) return context.json({ error: "Unauthorized" }, 401);
 
-  const token = deviceToken();
-  const tokenHash = await sha256hex(token);
-  const existing = await context.env.DB.prepare(
-    "SELECT id FROM host WHERE org_id = ? AND slug = ? LIMIT 1",
-  )
-    .bind(enrollment.org_id, enrollment.slug)
-    .first<{ id: string }>();
-  const id = existing?.id ?? hostId();
-
   try {
-    await context.env.DB.prepare(
-      `INSERT INTO host
-       (id, org_id, slug, token_hash, token_issued_at, daemon_ver, last_seen_at, revoked_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
-       ON CONFLICT(org_id, slug) DO UPDATE SET
-         token_hash = excluded.token_hash,
-         token_issued_at = excluded.token_issued_at,
-         daemon_ver = excluded.daemon_ver,
-         last_seen_at = NULL,
-         revoked_at = NULL`,
-    )
-      .bind(id, enrollment.org_id, enrollment.slug, tokenHash, usedAt, body.daemon_ver)
-      .run();
+    return context.json(
+      await provisionHost(
+        context.env.DB,
+        enrollment.org_id,
+        enrollment.slug,
+        body.daemon_ver,
+      ),
+    );
   } catch (error) {
+    // Hand the code back if the host never got written, so a transient failure
+    // does not burn the operator's single-use code.
     await context.env.DB.prepare(
       "UPDATE enroll_code SET used_at = NULL WHERE code_hash = ? AND used_at = ?",
     )
@@ -870,13 +1169,6 @@ app.post("/api/daemon/enroll", async (context) => {
       .run();
     throw error;
   }
-
-  return context.json({
-    device_token: token,
-    host_id: id,
-    host: enrollment.slug,
-    org: enrollment.org_id,
-  });
 });
 
 app.get("/api/daemon/ws", async (context) => {

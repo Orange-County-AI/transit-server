@@ -80,6 +80,43 @@ export const enrollCode = sqliteTable(
   (table) => [index("enroll_code_org_slug_idx").on(table.orgId, table.slug)],
 );
 
+/**
+ * A device-authorization flow in progress (RFC 8628 shaped).
+ *
+ * This is the path a host takes when nobody has pre-issued it a code. The
+ * daemon starts a flow and polls; the person approves it in a browser they
+ * already have open. It exists because Transit's hosts are typically remote
+ * headless machines, where a loopback OAuth callback cannot be reached.
+ *
+ * `device_code` is the daemon's secret and is stored only as a hash, like
+ * every other credential here. `user_code` is stored in the clear because the
+ * browser has to look a row up BY it; it is protected by short entropy-adequate
+ * life (8 chars of a 30-char alphabet, 15 minutes) rather than by secrecy.
+ *
+ * `org_id` and `slug` are null until somebody approves — this is the one table
+ * whose rows begin unscoped, because the whole point is that the daemon does
+ * not yet know which organization it belongs to.
+ */
+export const deviceAuthorization = sqliteTable(
+  "device_authorization",
+  {
+    deviceCodeHash: text("device_code_hash").primaryKey(),
+    userCode: text("user_code").notNull().unique(),
+    orgId: text("org_id"),
+    slug: text("slug"),
+    /** The daemon's own hostname, offered as the default slug on approval. */
+    hostname: text("hostname").notNull(),
+    daemonVer: text("daemon_ver").notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    approvedAt: integer("approved_at", { mode: "timestamp_ms" }),
+    /** Set when the token is handed over, so a device code is single-use. */
+    claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    /** Last poll, so an impatient daemon can be told to slow down. */
+    polledAt: integer("polled_at", { mode: "timestamp_ms" }),
+  },
+  (table) => [index("device_authorization_expires_idx").on(table.expiresAt)],
+);
+
 export const agentSnapshot = sqliteTable(
   "agent_snapshot",
   {

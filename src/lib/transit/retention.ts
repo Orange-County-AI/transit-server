@@ -70,6 +70,14 @@ export async function sweep(
       statement:
         "DELETE FROM enroll_code WHERE rowid IN (SELECT rowid FROM enroll_code WHERE expires_at < ? LIMIT ?)",
     },
+    {
+      // Expired device flows are dropped on the same pass. A user code is only
+      // unique while it lives, so leaving dead rows behind would eventually
+      // starve the code space.
+      cutoff: now,
+      statement:
+        "DELETE FROM device_authorization WHERE rowid IN (SELECT rowid FROM device_authorization WHERE expires_at < ? LIMIT ?)",
+    },
   ];
 
   let batches = 0;

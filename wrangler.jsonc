@@ -5,7 +5,9 @@
   "compatibility_date": "2026-05-07",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [
-    { "type": "Text", "globs": ["**/*.md"], "fallthrough": true }
+    { "type": "Text", "globs": ["**/*.md"], "fallthrough": true },
+    // The daemon installer is served verbatim at /install.
+    { "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }
   ],
   "observability": { "enabled": true },
   // Point this at the hostname you own, then set `vars.BETTER_AUTH_URL` to the
