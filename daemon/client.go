@@ -201,15 +201,29 @@ func (d *Daemon) handleIncoming(ctx context.Context, e *enrollmentRuntime, conne
 	}
 }
 
+// outboxTTL bounds how long a queued message may keep retrying before the
+// sender is told it never landed. It matches the Worker's own 24h ceiling for
+// a HostHub delivery, so the two halves of one send give up together.
+const outboxTTL = 24 * time.Hour
+
 func (d *Daemon) outboxLoop(ctx context.Context, e *enrollmentRuntime) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var lastReap time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		case <-e.kickOutbox:
+		}
+		// Expiry is time-based, not connection-based: the loop below only runs
+		// while a connection exists, and a box that is offline past the TTL is
+		// exactly the case where the sender most needs telling. The bounce is
+		// delivered locally, so it still arrives with the socket down.
+		if time.Since(lastReap) >= time.Minute {
+			lastReap = time.Now()
+			d.reapExpired(ctx, e)
 		}
 		for ctx.Err() == nil && e.currentConnection() != nil {
 			worked, err := d.flushOne(ctx, e)
@@ -221,6 +235,33 @@ func (d *Daemon) outboxLoop(ctx context.Context, e *enrollmentRuntime) {
 				break
 			}
 		}
+	}
+}
+
+// reapExpired retires every message that outlived the TTL and tells its sender,
+// with the age and the last transport error, so the decision to resend or drop
+// can be made from the notice instead of from a spool listing.
+//
+// A dead letter is time-shifted: by the time anyone reads it the request may be
+// answered, moot, or actively wrong. The notice therefore reports what happened
+// and when, and never retries on the sender's behalf.
+func (d *Daemon) reapExpired(ctx context.Context, e *enrollmentRuntime) {
+	if e.store == nil {
+		return
+	}
+	reason := fmt.Sprintf("expired after %s", outboxTTL)
+	reaped, err := e.store.Expire(time.Now().UTC().Add(-outboxTTL), reason)
+	if err != nil {
+		d.logf("outbox expiry (%s): %v", e.id, err)
+		return
+	}
+	for _, message := range reaped {
+		detail := reason
+		if message.LastError != "" {
+			detail = fmt.Sprintf("%s, %d attempts, last error: %s", reason, message.Attempts, message.LastError)
+		}
+		d.logf("outbox expired (%s): %s to %s after %s", e.id, message.ID, message.To, outboxTTL)
+		d.bounce(ctx, e, message, detail)
 	}
 }
 

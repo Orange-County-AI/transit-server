@@ -226,6 +226,58 @@ func outboxEligible(message *OutboxMessage, now time.Time) bool {
 	return !now.Before(message.LastAttempt.Add(wait))
 }
 
+// Expire moves every unclaimed outbox entry older than cutoff into the
+// dead-letter spool and returns what it reaped, so the caller can tell each
+// sender.
+//
+// Retry alone is not a policy. Without a bound, a message to a recipient that
+// is never coming back is retried at a 30s ceiling forever, and the sender is
+// told nothing, because the only notice Transit sends is the one for a
+// PERMANENT nak. A bound plus a bounce is what turns silent accumulation into
+// news the sender receives without having to remember to look.
+//
+// Claimed entries are skipped rather than yanked: a claim lasts one ack
+// timeout, so an in-flight message becomes eligible on the next sweep instead
+// of being reaped out from under a live send.
+func (s *Store) Expire(cutoff time.Time, reason string) ([]*OutboxMessage, error) {
+	var reaped []*OutboxMessage
+	err := s.withLock(func() error {
+		dir := filepath.Join(s.root, "outbox")
+		names, err := spoolNames(dir)
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if !strings.HasPrefix(name, "msg-") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			message, err := readOutbox(path)
+			if err != nil {
+				// An unreadable entry cannot be dated, so it cannot be judged
+				// stale. ListDead already reports it where a person will see it.
+				continue
+			}
+			if !message.TS.Before(cutoff) {
+				continue
+			}
+			if err := writeJSONAtomic(
+				filepath.Join(s.root, "dead", message.ID+".json"),
+				DeadMessage{Message: message, Reason: reason, At: time.Now().UTC()},
+				0o600,
+			); err != nil {
+				return err
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			reaped = append(reaped, message)
+		}
+		return nil
+	})
+	return reaped, err
+}
+
 func (s *Store) Ack(claim *ClaimedMessage) error {
 	if claim == nil || claim.Message == nil || claim.Path == "" {
 		return fmt.Errorf("invalid outbox claim")

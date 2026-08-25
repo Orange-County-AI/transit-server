@@ -374,6 +374,20 @@ collision-safe without treating a process or pane as the durable identity.
 claimed or targeted.** **Rationale:** system-originated traffic must not be
 impersonable or delivered to an ordinary agent.
 
+**Decision — a queued send is bounded, and its sender is told when it dies.**
+A permanent nak (`no_route`, `not_member`, `body_too_large`, `reserved_name`)
+kills the outbox entry at the first answer; every other failure retries at a
+30 s backoff ceiling and expires after 24 h, matching the `HostHub` delivery
+TTL so both halves of one send give up together. Expiry runs on the outbox
+ticker rather than the flush path, because the flush loop only runs while a
+connection exists and an offline box is exactly where a caller most needs
+telling. Either death writes a dead letter and injects `undeliverable to
+<target>: <reason>` to the sender, an expiry adding the age, attempt count and
+last transport error. **Rationale:** unbounded retry with no notice is
+indistinguishable from delivery from the sender's side; the notice is
+best-effort and single-shot, which is why the dead-letter spool remains the
+durable record and `transit inbox` lists it.
+
 **Decision — Transit has no link-scoped identity.** The Worker is the single
 rendezvous, so `name@host` is globally routable within its organization by
 construction. **Rationale:** a central authenticated rendezvous removes the
