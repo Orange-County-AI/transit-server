@@ -143,6 +143,41 @@ func TestOutboxExpirySparesAFreshMessage(t *testing.T) {
 	}
 }
 
+// An abandoned claim is the case the first version of Expire could not see.
+// Claim only considers `msg-`, so a claim that leaks — a Release whose write
+// failed, a flight dropped between rename and release — was invisible to both
+// the claimer and the sweep, and only a daemon restart recovered it through
+// ReclaimOrphans. The assertion was right and its location was unreachable,
+// which is its own defect class.
+func TestOutboxExpiryReachesAnAbandonedClaim(t *testing.T) {
+	d := herdrlessDaemon(t)
+	e := d.enrollmentsByID["default"]
+	stale := &OutboxMessage{
+		ID: "tx_abandoned", From: "a@titan", To: "ghost@titan",
+		Body: "claimed and then dropped on the floor",
+		TS:   time.Now().UTC().Add(-25 * time.Hour),
+	}
+	if err := e.store.Enqueue(stale); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := e.store.Claim(time.Now())
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %v, %v", claim, err)
+	}
+	// Deliberately neither acked, released nor killed: the claim is now orphaned
+	// with the daemon still alive, so no restart is coming to rescue it.
+
+	d.reapExpired(context.Background(), e)
+
+	outbox, dead, err := e.store.Counts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outbox != 0 || dead != 1 {
+		t.Fatalf("outbox=%d dead=%d; an abandoned claim must still reach the TTL", outbox, dead)
+	}
+}
+
 // The two tests above call reapExpired directly, so deleting its call site from
 // outboxLoop would leave both of them green and the feature dead. This drives
 // the loop itself, with no connection, which is also the arrangement that used

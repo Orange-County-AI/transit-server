@@ -226,9 +226,8 @@ func outboxEligible(message *OutboxMessage, now time.Time) bool {
 	return !now.Before(message.LastAttempt.Add(wait))
 }
 
-// Expire moves every unclaimed outbox entry older than cutoff into the
-// dead-letter spool and returns what it reaped, so the caller can tell each
-// sender.
+// Expire moves every outbox entry older than cutoff into the dead-letter spool
+// and returns what it reaped, so the caller can tell each sender.
 //
 // Retry alone is not a policy. Without a bound, a message to a recipient that
 // is never coming back is retried at a 30s ceiling forever, and the sender is
@@ -236,9 +235,12 @@ func outboxEligible(message *OutboxMessage, now time.Time) bool {
 // PERMANENT nak. A bound plus a bounce is what turns silent accumulation into
 // news the sender receives without having to remember to look.
 //
-// Claimed entries are skipped rather than yanked: a claim lasts one ack
-// timeout, so an in-flight message becomes eligible on the next sweep instead
-// of being reaped out from under a live send.
+// Claimed entries are included, which is the whole point of doing this here.
+// A claim lasts one 10s acknowledgement timeout, so a claim older than the TTL
+// is abandoned by definition — and an abandoned claim is invisible to Claim,
+// which only looks at `msg-`, so nothing but a daemon restart would ever see
+// it again. Skipping claims would have placed this check where the stuck case
+// cannot reach it: correct assertion, unreachable location.
 func (s *Store) Expire(cutoff time.Time, reason string) ([]*OutboxMessage, error) {
 	var reaped []*OutboxMessage
 	err := s.withLock(func() error {
@@ -248,7 +250,7 @@ func (s *Store) Expire(cutoff time.Time, reason string) ([]*OutboxMessage, error
 			return err
 		}
 		for _, name := range names {
-			if !strings.HasPrefix(name, "msg-") {
+			if !strings.HasPrefix(name, "msg-") && !strings.HasPrefix(name, "claimed-") {
 				continue
 			}
 			path := filepath.Join(dir, name)
