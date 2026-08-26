@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import type {
+  ConfigField,
   Connector,
+  ConnectorAttachment,
   ConnectorCtx,
   ConnectorEvent,
   ConnectorStorage,
@@ -8,6 +10,10 @@ import type {
   ReplyRequest,
 } from "transit-connector-kit";
 import { connectorFor } from "../connectors/registry";
+import {
+  createAttachmentCapability,
+  MAX_EVENT_ATTACHMENTS,
+} from "../lib/transit/attachment";
 import { parseAddress } from "../lib/transit/addr";
 import {
   ALARM_BUDGET_PER_HOUR,
@@ -22,6 +28,15 @@ import {
 } from "../lib/transit/envelope";
 import { dlvId, eventId } from "../lib/transit/ids";
 import { consumeStoredToken } from "../lib/transit/token-bucket";
+const HEALTH_PING_INTERVAL_MS = 60_000;
+const HEALTH_PING_KEY = "health:last_ping";
+export const HEALTH_CONFIG_FIELD: ConfigField = {
+  key: "health_ping_url",
+  label: "Health heartbeat URL",
+  secret: true,
+  help:
+    "Optional heartbeat URL. Transit pings it only while this connector is healthy and its named target is present.",
+};
 
 const BASE_REDELIVERY_MS = 5 * 60 * 1_000;
 const MAX_REDELIVERY_MS = 30 * 60 * 1_000;
@@ -152,6 +167,44 @@ export type ChatReplyResult = {
   postError?: string;
 };
 
+export type ReadMessageResult = {
+  text: string;
+  attachments: Array<{
+    name: string;
+    contentType?: string;
+    size?: number;
+    url: string;
+  }>;
+};
+
+function validatedAttachments(
+  attachments: ConnectorAttachment[] | undefined,
+): ConnectorAttachment[] | undefined {
+  if (attachments === undefined) return undefined;
+  if (!Array.isArray(attachments) || attachments.length > MAX_EVENT_ATTACHMENTS) {
+    throw new Error(`attachments must contain at most ${MAX_EVENT_ATTACHMENTS} files`);
+  }
+  return attachments.map((attachment) => {
+    if (
+      !attachment ||
+      typeof attachment.id !== "string" ||
+      attachment.id.length < 1 ||
+      attachment.id.length > 512 ||
+      typeof attachment.name !== "string" ||
+      attachment.name.length < 1 ||
+      attachment.name.length > 512 ||
+      (attachment.contentType !== undefined &&
+        (typeof attachment.contentType !== "string" ||
+          attachment.contentType.length > 200)) ||
+      (attachment.size !== undefined &&
+        (!Number.isSafeInteger(attachment.size) || attachment.size < 0))
+    ) {
+      throw new Error("invalid connector attachment");
+    }
+    return { ...attachment };
+  });
+}
+
 export class Integration extends DurableObject<Env> {
   private readonly runtime = new Map<string, unknown>();
   // Last status written, so a 1s burst loop does not turn into a 1s storage
@@ -176,22 +229,39 @@ export class Integration extends DurableObject<Env> {
     }
 
     const existingConfig = previous
-      ? JSON.parse(await openSecret(previous.configEnc, this.env.TRANSIT_MASTER_KEY)) as Record<string, string>
+      ? (JSON.parse(
+          await openSecret(previous.configEnc, this.env.TRANSIT_MASTER_KEY),
+        ) as Record<string, string>)
       : {};
     const config: Record<string, string> = {};
     const secretFingerprints: Record<string, string> = {};
-    for (const field of connector.configFields) {
+    for (const field of [...connector.configFields, HEALTH_CONFIG_FIELD]) {
       const supplied = input.config[field.key];
       const value = field.secret && !supplied ? existingConfig[field.key] : supplied;
       if (field.required && !value) throw new Error(`${field.key} is required`);
       if (value) config[field.key] = value;
-      if (field.secret && value) secretFingerprints[field.key] = await sha256hex(value);
+      if (field.secret && value) {
+        secretFingerprints[field.key] = await sha256hex(value);
+      }
+    }
+    if (config.health_ping_url) {
+      let healthURL: URL;
+      try {
+        healthURL = new URL(config.health_ping_url);
+      } catch {
+        throw new Error("health_ping_url must be an HTTPS URL");
+      }
+      if (healthURL.protocol !== "https:") {
+        throw new Error("health_ping_url must be an HTTPS URL");
+      }
     }
 
     if (previous) {
       const previousConnector = connectorFor(previous.connector);
       if (previousConnector.stop) {
-        await previousConnector.stop(await this.connectorContext(previousConnector, existingConfig));
+        await previousConnector.stop(
+          await this.connectorContext(previousConnector, existingConfig),
+        );
       }
     }
 
@@ -246,7 +316,10 @@ export class Integration extends DurableObject<Env> {
         });
       }
     }
-    if (meta.status === "active") await this.armPoll(connector);
+    if (meta.status === "active") {
+      await this.armPoll(connector);
+      await this.armHealth(config);
+    }
     return this.detail();
   }
 
@@ -257,7 +330,7 @@ export class Integration extends DurableObject<Env> {
       await openSecret(meta.configEnc, this.env.TRANSIT_MASTER_KEY),
     ) as Record<string, string>;
     const visibleConfig: Record<string, string> = {};
-    for (const field of connector.configFields) {
+    for (const field of [...connector.configFields, HEALTH_CONFIG_FIELD]) {
       const value = config[field.key];
       if (!field.secret && value) visibleConfig[field.key] = value;
     }
@@ -279,11 +352,13 @@ export class Integration extends DurableObject<Env> {
       meta: publicMeta,
       config: visibleConfig,
       secretFingerprints:
-        (await this.ctx.storage.get<Record<string, string>>("secretFingerprints")) ?? {},
+        (await this.ctx.storage.get<Record<string, string>>(
+          "secretFingerprints",
+        )) ?? {},
       connectorStatus:
         (await this.ctx.storage.get<ConnectorStatus>("connectorStatus")) ?? null,
       deliveries,
-      configFields: connector.configFields,
+      configFields: [...connector.configFields, HEALTH_CONFIG_FIELD],
       mode: connector.mode,
     };
   }
@@ -296,6 +371,11 @@ export class Integration extends DurableObject<Env> {
     deliveryId: string;
   }> {
     const meta = await this.requireMeta();
+    const attachments = validatedAttachments(event.attachments);
+    const normalizedEvent: ConnectorEvent = {
+      ...event,
+      ...(attachments === undefined ? {} : { attachments }),
+    };
     if (meta.status !== "active") throw new Error("integration_paused");
     if (
       meta.connector === "ingest" &&
@@ -318,7 +398,7 @@ export class Integration extends DurableObject<Env> {
       if (existing) return { status: "duplicate" as const, ...existing };
 
       const storedEvent: StoredEvent = {
-        ...event,
+        ...normalizedEvent,
         id: eventId(),
         integrationId: meta.id,
         receivedAt: Date.now(),
@@ -382,6 +462,7 @@ export class Integration extends DurableObject<Env> {
         "integration_read_write_failed",
         this.deliveryStatement(delivery).run(),
       );
+
       await this.scheduleDelivery(delivery);
     }
     const config = await this.openConfig(meta);
@@ -396,6 +477,84 @@ export class Integration extends DurableObject<Env> {
       body: event.content,
       instructions: config.instructions,
     });
+  }
+  async readMessageV2(
+    deliveryId: string,
+    caller: string,
+  ): Promise<ReadMessageResult> {
+    const text = await this.readMessage(deliveryId, caller);
+    const meta = await this.requireMeta();
+    const delivery = await this.requireDelivery(deliveryId);
+    await this.assertOwner(delivery, caller, meta.org);
+    const event = await this.requireEvent(delivery.eventId);
+    const origin = new URL(this.env.BETTER_AUTH_URL).origin;
+    const attachments = await Promise.all(
+      (event.attachments ?? []).map(async (attachment, index) => {
+        const token = await createAttachmentCapability(
+          {
+            org: meta.org,
+            integrationId: meta.id,
+            eventId: event.id,
+            deliveryId,
+            index,
+          },
+          this.env.TRANSIT_MASTER_KEY,
+        );
+        const url = new URL("/api/attachments", origin);
+        url.searchParams.set("token", token);
+        return {
+          name: attachment.name,
+          ...(attachment.contentType
+            ? { contentType: attachment.contentType }
+            : {}),
+          ...(attachment.size !== undefined ? { size: attachment.size } : {}),
+          url: url.toString(),
+        };
+      }),
+    );
+    return { text, attachments };
+  }
+
+  override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method !== "GET" || url.pathname !== "/attachment") {
+      return new Response("Not found", { status: 404 });
+    }
+    const eventID = url.searchParams.get("event");
+    const rawIndex = url.searchParams.get("index");
+    const index = rawIndex === null ? Number.NaN : Number(rawIndex);
+    if (!eventID || !Number.isSafeInteger(index) || index < 0) {
+      return new Response("Invalid attachment", { status: 400 });
+    }
+    const meta = await this.requireMeta();
+    const event = await this.requireEvent(eventID);
+    if (event.integrationId !== meta.id) {
+      return new Response("Attachment not found", { status: 404 });
+    }
+    const attachment = event.attachments?.[index];
+    if (!attachment) return new Response("Attachment not found", { status: 404 });
+    const connector = connectorFor(meta.connector);
+    if (!connector.fetchAttachment) {
+      return new Response("Connector has no attachments", { status: 404 });
+    }
+    const upstream = await connector.fetchAttachment(
+      await this.connectorContext(connector, await this.openConfig(meta)),
+      event,
+      attachment,
+    );
+    if (!upstream.ok) {
+      return new Response("Attachment upstream failed", { status: 502 });
+    }
+    const headers = new Headers({
+      "cache-control": "private, no-store",
+      "content-type":
+        upstream.headers.get("content-type") ||
+        attachment.contentType ||
+        "application/octet-stream",
+    });
+    const length = upstream.headers.get("content-length");
+    if (length) headers.set("content-length", length);
+    return new Response(upstream.body, { status: 200, headers });
   }
 
   async chatReply(input: {
@@ -568,6 +727,7 @@ export class Integration extends DurableObject<Env> {
       if (connector.start) await connector.start(await this.connectorContext(connector, config));
       await this.dispatchDue();
       await this.armPoll(connector);
+      await this.armHealth(config);
     }
     this.background(
       "integration_pause_write_failed",
@@ -629,14 +789,13 @@ export class Integration extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const meta = await this.meta();
     if (!meta || meta.status !== "active") return;
+    const connector = connectorFor(meta.connector);
+    const config = await this.openConfig(meta);
     await this.retryReplies(meta);
     await this.dispatchDue();
-    const connector = connectorFor(meta.connector);
     if (connector.wake) {
       try {
-        await connector.wake(
-          await this.connectorContext(connector, await this.openConfig(meta)),
-        );
+        await connector.wake(await this.connectorContext(connector, config));
       } catch (error) {
         await this.setConnectorStatus({
           state: "error",
@@ -645,6 +804,7 @@ export class Integration extends DurableObject<Env> {
       }
     }
     if (connector.poll) await this.runPollWindow(meta, connector);
+    await this.reportHealth(meta, config);
     await this.scheduleNext();
   }
 
@@ -935,6 +1095,62 @@ export class Integration extends DurableObject<Env> {
     await this.scheduleAt(Math.max(state.backoffUntil, now + POLL_ACTIVE_MS));
   }
 
+  private async armHealth(config: Record<string, string>): Promise<void> {
+    if (config.health_ping_url) {
+      await this.scheduleAt(Date.now() + 1_000);
+    }
+  }
+
+  private async reportHealth(
+    meta: IntegrationMeta,
+    config: Record<string, string>,
+  ): Promise<void> {
+    const pingURL = config.health_ping_url;
+    if (!pingURL) return;
+    const now = Date.now();
+    const lastPing = (await this.ctx.storage.get<number>(HEALTH_PING_KEY)) ?? 0;
+    if (now - lastPing < HEALTH_PING_INTERVAL_MS) return;
+    const status =
+      (await this.ctx.storage.get<ConnectorStatus>("connectorStatus")) ?? null;
+    if (
+      !status ||
+      status.state === "error" ||
+      status.state === "paused"
+    ) {
+      return;
+    }
+    const target = parseAddress(meta.targetAddr);
+    if (
+      target.kind !== "agent" ||
+      !(await this.env.HOST_HUB.getByName(
+        `org:${meta.org}:host:${target.host}`,
+      ).hasAgent(target.name))
+    ) {
+      return;
+    }
+    try {
+      const response = await fetch(pingURL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          integration: meta.name,
+          connector: meta.connector,
+          target: meta.targetAddr,
+          state: status.state,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`heartbeat returned HTTP ${response.status}`);
+      }
+      await this.ctx.storage.put(HEALTH_PING_KEY, now);
+    } catch (error) {
+      console.warn("transit integration heartbeat failed", {
+        integration: meta.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /**
    * Run poll cycles until the burst window closes or the cadence relaxes past
    * burst speed, then hand the remaining wait back to the alarm.
@@ -1017,6 +1233,14 @@ export class Integration extends DurableObject<Env> {
     ).values()) {
       if (reply.postedAt || reply.nextAttemptAt === undefined) continue;
       next = next === null ? reply.nextAttemptAt : Math.min(next, reply.nextAttemptAt);
+    }
+    const meta = await this.meta();
+    if (meta?.status === "active") {
+      const config = await this.openConfig(meta);
+      if (config.health_ping_url) {
+        const healthAt = Date.now() + HEALTH_PING_INTERVAL_MS;
+        next = next === null ? healthAt : Math.min(next, healthAt);
+      }
     }
     if (next !== null) await this.scheduleAt(next);
   }
