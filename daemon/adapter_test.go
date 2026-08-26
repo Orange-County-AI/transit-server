@@ -360,6 +360,22 @@ func TestAdapterRegistrationAbsorbsADeadRecordHoldingItsPaneName(t *testing.T) {
 	}
 }
 
+func TestCallerAgentPrefersNativeAdapterWhenPaneHasDifferentName(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{{Name: "omp-restarted", Kind: "omp", PaneID: "pane-1"}}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	setAdapterTestHerdrAgents(d, agents)
+	attachNativeCaller(t, d, "stub")
+
+	name, enrollment, found := d.callerAgent(map[string]any{
+		"pane_id": "pane-1",
+		"pid":     os.Getpid(),
+	})
+	if !found || name != "stub" || enrollment != defaultEnrollment {
+		t.Fatalf("callerAgent = %q/%q/%t, want stable native identity stub/%s/true", name, enrollment, found, defaultEnrollment)
+	}
+}
+
 func TestClaimCallerNameRebindsNativeAdapter(t *testing.T) {
 	var prompts int
 	d, _ := newAdapterTestDaemon(t, "prefer", nil, &prompts)

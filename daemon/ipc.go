@@ -119,24 +119,26 @@ func intValue(request map[string]any, key string) int {
 
 // callerAgent resolves the calling agent's name.
 //
-// Herdr-managed sessions identify themselves by pane id. A harness with a
-// native adapter has no pane, and with herdr.service stopped there is no pane
-// id to send at all, so the caller's process ancestry is walked instead: the
-// Transit MCP server is a child of the harness process that registered.
-// It also resolves which organization the caller belongs to, because that is
-// what its address and its outbox partition are chosen by.
+// A native adapter is authoritative for its harness process, even when that
+// harness also occupies a Herdr pane. The pane may still have its generated
+// post-restart name while the adapter has already reclaimed a configured stable
+// name; choosing the pane in that interval injects a delivery into the right
+// transcript but makes every settlement fail ownership validation.
+//
+// Pane identity remains the fallback for harnesses without a native adapter.
+// The resolved enrollment chooses both the caller address and outbox partition.
 func (d *Daemon) callerAgent(request map[string]any) (name, enrollment string, found bool) {
+	if pid := intValue(request, "pid"); pid > 0 {
+		if adapter := d.nativeAdapterForProcess(pid); adapter != nil {
+			return adapter.name, adapter.enrollment, true
+		}
+	}
 	if agent, ok := d.localAgentByPane(stringValue(request, "pane_id")); ok && agent.Name != "" {
 		herdr := defaultEnrollment
 		if runtime := d.defaultEnrollmentRuntime(); runtime != nil {
 			herdr = runtime.id
 		}
 		return agent.Name, herdr, true
-	}
-	if pid := intValue(request, "pid"); pid > 0 {
-		if adapter := d.nativeAdapterForProcess(pid); adapter != nil {
-			return adapter.name, adapter.enrollment, true
-		}
 	}
 	return "", "", false
 }
@@ -381,13 +383,11 @@ func (d *Daemon) rpcResponse(ctx context.Context, request map[string]any) map[st
 	if params == nil {
 		params = make(map[string]any)
 	}
-	_, callerEnrollment, hasCaller := d.callerAgent(request)
-	if paneID := stringValue(request, "pane_id"); paneID != "" {
-		agent, found := d.localAgentByPane(paneID)
-		if !found || agent.Name == "" {
-			return failure("agent_not_found", "calling pane is not a named herdr agent")
-		}
-		params["caller"] = agent.Name + "@" + d.enrollmentHost(callerEnrollment)
+	callerName, callerEnrollment, hasCaller := d.callerAgent(request)
+	if hasCaller {
+		params["caller"] = callerName + "@" + d.enrollmentHost(callerEnrollment)
+	} else if stringValue(request, "pane_id") != "" {
+		return failure("agent_not_found", "calling pane is not a named herdr agent")
 	}
 	enrollment := d.enrollment(callerEnrollment)
 	if !hasCaller {
