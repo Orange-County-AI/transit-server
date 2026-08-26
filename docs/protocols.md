@@ -473,6 +473,20 @@ chat id lists, uses update id as the dedupe key, and commits ingest before
 returning 200.
 - **Kaneo** receives webhooks at `/hooks/kaneo/{integration_id}`, validates the
 `x-kaneo-signature` HMAC, and posts replies as comments.
+- **Slack** receives Events API webhooks at `/hooks/slack/{integration_id}`. It
+verifies `X-Slack-Signature` as an exact-byte HMAC over
+`v0:{X-Slack-Request-Timestamp}:{body}` inside a five minute window, then answers
+the signed `url_verification` challenge. Socket Mode is deliberately unused: an
+outbound socket held inside the Integration DO is not hibernatable, and the host
+schedules nothing for a socket connector. Its `conversation_id` is
+`{channel}:{thread_root_ts}`, so a reply lands in the thread that asked and
+`reply_mode root|thread` chooses between the thread and the channel. Direct
+messages always relay; a channel relays only on a mention, which starts a
+followed thread. Events are keyed on `{channel}:{ts}` rather than Slack's
+`event_id`, so a mention delivered as both `message.channels` and `app_mention`
+dedupes. Slack's escaping is decoded on the way in and reapplied on the way out,
+and a rate-limited display-name lookup degrades to raw IDs rather than dropping
+the message.
 
 Every integration instance routes to exactly one target: an agent address or a
 room.

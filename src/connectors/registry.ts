@@ -1,6 +1,7 @@
 import type { Connector } from "transit-connector-kit";
 import mattermost from "transit-connector-mattermost";
 import gmail from "transit-connector-gmail";
+import slack from "transit-connector-slack";
 import telegram from "transit-connector-telegram";
 import kaneo from "transit-connector-kaneo";
 import ingest from "./ingest";
@@ -8,6 +9,7 @@ import ingest from "./ingest";
 export const CONNECTORS: Record<string, Connector> = {
   mattermost,
   gmail,
+  slack,
   telegram,
   kaneo,
   ingest,

@@ -1871,7 +1871,7 @@ app.post("/api/deliveries/:id/handle", async (context) => {
   return context.json(result);
 });
 
-for (const connector of ["telegram", "kaneo"] as const) {
+for (const connector of ["telegram", "kaneo", "slack"] as const) {
   app.post(`/hooks/${connector}/:id`, async (context) => {
     const row = await context.env.DB.prepare(
       `SELECT id, org_id, status FROM integration
