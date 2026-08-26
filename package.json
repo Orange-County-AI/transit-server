@@ -35,7 +35,7 @@
     "better-auth": "1.6.22",
     "drizzle-orm": "0.45.2",
     "hono": "4.12.34",
-    "transit-connector-gmail": "github:Orange-County-AI/transit-connector-gmail#v0.3.2",
+    "transit-connector-gmail": "github:Orange-County-AI/transit-connector-gmail#v0.3.3",
     "transit-connector-kaneo": "github:Orange-County-AI/transit-connector-kaneo#v0.1.0",
     "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.3.0",
     "transit-connector-mattermost": "github:Orange-County-AI/transit-connector-mattermost#v0.3.0",

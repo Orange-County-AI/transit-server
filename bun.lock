@@ -8,7 +8,7 @@
         "better-auth": "1.6.22",
         "drizzle-orm": "0.45.2",
         "hono": "4.12.34",
-        "transit-connector-gmail": "github:Orange-County-AI/transit-connector-gmail#v0.3.2",
+        "transit-connector-gmail": "github:Orange-County-AI/transit-connector-gmail#v0.3.3",
         "transit-connector-kaneo": "github:Orange-County-AI/transit-connector-kaneo#v0.1.0",
         "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.3.0",
         "transit-connector-mattermost": "github:Orange-County-AI/transit-connector-mattermost#v0.3.0",
@@ -394,7 +394,7 @@
 
     "tinyrainbow": ["tinyrainbow@3.1.1", "", {}, "sha512-yau8yJdTt989Mm0Bd/236QnzEiPf2xLLTqUZRUJOo/3CB078LSwzei343DgtJVmfJKJE3TMINY1u42SQsP6mXw=="],
 
-    "transit-connector-gmail": ["transit-connector-gmail@github:Orange-County-AI/transit-connector-gmail#ed09377", {}, "Orange-County-AI-transit-connector-gmail-ed09377", "sha512-cvPTzGsM3Tx6tNTWVC0ahUrob2DPoy3KzbhT+tc27IFIRtB6f0pIVa2HfOnOeKYDC1eMSPqCNRRTms1flfJhMA=="],
+    "transit-connector-gmail": ["transit-connector-gmail@github:Orange-County-AI/transit-connector-gmail#b4bcf0b", {}, "Orange-County-AI-transit-connector-gmail-b4bcf0b", "sha512-KbEySe58I16Ro6pVhgBaMtJUuWNqskLXcVyA613K4T5itsnTkYXEdEOgwrC7hDB9G1eM7rmPAksQ7wr0S4l8GA=="],
 
     "transit-connector-kaneo": ["transit-connector-kaneo@github:Orange-County-AI/transit-connector-kaneo#2e3c400", {}, "Orange-County-AI-transit-connector-kaneo-2e3c400", "sha512-GB0BDxpO2M7yPgBAPyCLEqF2ZpoGiOREFSfLX6mvVqbbdNyNLArhDptoB4sA3VL4Z4NDHhYe3kT9pOsWX2t1Dg=="],
 
