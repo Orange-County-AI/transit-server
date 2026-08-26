@@ -39,7 +39,7 @@
     "transit-connector-kaneo": "github:Orange-County-AI/transit-connector-kaneo#v0.1.0",
     "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.2.0",
     "transit-connector-mattermost": "github:Orange-County-AI/transit-connector-mattermost#v0.2.2",
-    "transit-connector-slack": "file:/home/stephan/projects/ocai/transit-connector-slack",
+    "transit-connector-slack": "github:Orange-County-AI/transit-connector-slack#v0.1.0",
     "transit-connector-telegram": "github:Orange-County-AI/transit-connector-telegram#v0.1.0"
   }
 }

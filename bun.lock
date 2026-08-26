@@ -12,7 +12,7 @@
         "transit-connector-kaneo": "github:Orange-County-AI/transit-connector-kaneo#v0.1.0",
         "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.2.0",
         "transit-connector-mattermost": "github:Orange-County-AI/transit-connector-mattermost#v0.2.2",
-        "transit-connector-slack": "file:/home/stephan/projects/ocai/transit-connector-slack",
+        "transit-connector-slack": "github:Orange-County-AI/transit-connector-slack#v0.1.0",
         "transit-connector-telegram": "github:Orange-County-AI/transit-connector-telegram#v0.1.0",
       },
       "devDependencies": {
@@ -63,7 +63,7 @@
 
     "@cloudflare/workerd-windows-64": ["@cloudflare/workerd-windows-64@1.20260820.1", "", { "os": "win32", "cpu": "x64" }, "sha512-BPvCuMxIQfA47wtYsGbBG6Bcar57Qs7yHqU2jWkT1+sRnL/741/ZbQGP9kVRMQ5fwBMuqNFmQRzAu8gSm7ri/w=="],
 
-    "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260702.1", "", {}, "sha512-mOhf5TUEB1m2vPrxtqoIGfz0fUC9xyxRDx5gWHy5s+OCo6dcV+g7wI1R7gYCMFohhqF/2y2xeKVwMwCJjfn/WA=="],
+    "@cloudflare/workers-types": ["@cloudflare/workers-types@5.20260826.1", "", {}, "sha512-hyW0QHvJYKhsMTAx1YZkbhcXBr17Brl1xZwvVExYmB5pAExJCCzAEouKNGwag2H+yBlqLay3X3kZoiJoGu2DRw=="],
 
     "@cspotcode/source-map-support": ["@cspotcode/source-map-support@0.8.1", "", { "dependencies": { "@jridgewell/trace-mapping": "0.3.9" } }, "sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw=="],
 
@@ -403,7 +403,7 @@
 
     "transit-connector-mattermost": ["transit-connector-mattermost@github:Orange-County-AI/transit-connector-mattermost#a764a5b", {}, "Orange-County-AI-transit-connector-mattermost-a764a5b", "sha512-Fzdx199TDUQpSESSqueSd36i2PktUsQ9OTy6KLHT1b0XY45b+Xhynfi+pM5VOeFG+kI3JMK5In5NXjKe7CY3jw=="],
 
-    "transit-connector-slack": ["transit-connector-slack@file:../../home/stephan/projects/ocai/transit-connector-slack", { "devDependencies": { "@cloudflare/workers-types": "^4.20260507.0", "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.2.0", "typescript": "^5.9.3", "vitest": "^4.1.5" } }],
+    "transit-connector-slack": ["transit-connector-slack@github:Orange-County-AI/transit-connector-slack#e3000b8", {}, "Orange-County-AI-transit-connector-slack-e3000b8", "sha512-sZad0yPbPruviU+YGOO7jwIaMo9WIUQ2/P9/nbi/rYPU3PDYGRCsu3fFgpKO7PpwuZn5x1ZVfmGaeqlzU/7Bng=="],
 
     "transit-connector-telegram": ["transit-connector-telegram@github:Orange-County-AI/transit-connector-telegram#c75453f", {}, "Orange-County-AI-transit-connector-telegram-c75453f", "sha512-aiaPuFJglt8GyClW2mzAhlRJD8NxRCjlcTq0Vofa01gx7rUfzdZs0IlIECo4q1HcWTBaHhiRoOo5EsKhmKl9+Q=="],
 
