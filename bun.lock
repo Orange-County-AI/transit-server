@@ -11,7 +11,7 @@
         "transit-connector-gmail": "github:Orange-County-AI/transit-connector-gmail#v0.3.3",
         "transit-connector-kaneo": "github:Orange-County-AI/transit-connector-kaneo#v0.2.0",
         "transit-connector-kit": "github:Orange-County-AI/transit-connector-kit#v0.3.0",
-        "transit-connector-mattermost": "github:Orange-County-AI/transit-connector-mattermost#v0.3.0",
+        "transit-connector-mattermost": "github:Orange-County-AI/transit-connector-mattermost#v0.3.1",
         "transit-connector-telegram": "github:Orange-County-AI/transit-connector-telegram#v0.1.0",
       },
       "devDependencies": {
@@ -400,7 +400,7 @@
 
     "transit-connector-kit": ["transit-connector-kit@github:Orange-County-AI/transit-connector-kit#f6ecb60", { "peerDependencies": { "@cloudflare/workers-types": ">=4.20260507.0" } }, "Orange-County-AI-transit-connector-kit-f6ecb60", "sha512-GBnRpzCOMmLHK+9NzWRPfqiHZ272fDn3N0HYSWdogyYG+XaaIS4c4h3StSuXqI411KPJEf7H4dyLVZ7eDMzPUA=="],
 
-    "transit-connector-mattermost": ["transit-connector-mattermost@github:Orange-County-AI/transit-connector-mattermost#e8ea635", {}, "Orange-County-AI-transit-connector-mattermost-e8ea635", "sha512-CTgsQo5ssS/3lCDVPypSHG4D7xw5Vx/61Iq/tHffxkCFvFIygZb1y9kOYdpAT5ef254smNsqSIk4m8/oC4LIrg=="],
+    "transit-connector-mattermost": ["transit-connector-mattermost@github:Orange-County-AI/transit-connector-mattermost#2d4c2b4", {}, "Orange-County-AI-transit-connector-mattermost-2d4c2b4", "sha512-2wp0+g0ysMmPz+BFThgsruR9u5QVuKZls5RoN5TF171soKGhPeBE+Z/QD0R9Oym2e6E8ejV8ZE2Vp21HMkXIPg=="],
 
     "transit-connector-telegram": ["transit-connector-telegram@github:Orange-County-AI/transit-connector-telegram#c75453f", {}, "Orange-County-AI-transit-connector-telegram-c75453f", "sha512-aiaPuFJglt8GyClW2mzAhlRJD8NxRCjlcTq0Vofa01gx7rUfzdZs0IlIECo4q1HcWTBaHhiRoOo5EsKhmKl9+Q=="],
 
