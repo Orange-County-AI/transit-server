@@ -448,6 +448,53 @@ sequenceDiagram
   Integration->>Integration: settled
 ```
 
+## Delivery observables report arrival, never execution
+
+**Decision — no liveness or consumer-health signal may be derived from the
+delivery observables alone.** Every fact this system records is produced by the
+delivery machinery itself, so each one reports that a *message moved*. None
+reports that an *agent acted*.
+
+| Observable | What it actually means | What readers assume |
+| --- | --- | --- |
+| `integration_delivery.attempts` | dispatch intent | arrivals |
+| the `sessionHeld` ack | the envelope is durable in the session branch | the agent acted on it |
+| `HostHub.hasAgent` | a daemon says this session is live | the agent can act |
+| `reportHealth` | connector status plus a roster entry | the path is working |
+| `deliveryLanded` | the id reached the pane's transcript | the turn executed |
+
+`deliveryLanded` is the subtlest and its precedence is load-bearing: the
+transcript check wins whenever `SessionTranscript()` is non-empty, and the
+`state_change_seq` comparison is reached only when it is empty. The comment at
+the prompt call site already says why the counter cannot carry more weight —
+"a state change proves nothing for an agent that was already working when the
+envelope arrived, which is every busy pane." The fallback is weak in the same
+direction as the primary: a stalled harness still accrues state changes from
+session restore, monitor ticks and failed turns.
+
+**Rationale:** measured on 2026-08-27. A workspace agent whose harness login had
+expired completed no turn for eight hours while every one of these read healthy:
+it acked deliveries, persisted them to its transcript, held a roster entry, kept
+its integration heartbeat green, and reported `agent_status: idle` throughout.
+Four successive alarm designs were built from these fields and all four failed
+review, because no combination of arrival-shaped facts yields an execution fact.
+
+**Consequence.** An agent contributes nothing to the plane except when it acts,
+so the absence of agent-contributed facts is permanently ambiguous between
+"nothing to say" and "cannot say anything". A correct `mark_handled` with no
+reply is indistinguishable from a dead harness at this layer. Detecting a harness
+that cannot act therefore requires an assertion that **costs a turn** — the one
+claim persistence cannot forge, because completing it requires the capability
+being measured. Until such a fact exists the pane text is the only witness, and
+it is the only artifact an agent cannot produce without running.
+
+A per-integration `oldest_unsettled_age` may be emitted *beside* the health ping
+as a channel-side signal. It must not be folded into `reportHealth`, whose
+consumers would then read a slow agent as a broken connector, and its threshold
+belongs to the alarm author: one value has to hold for the busiest and the
+quietest integration in a fleet. It covers channel deliveries only — agent and
+room traffic carry no `read_at` or `settled_at` at all.
+
 ## Enrollment and device credentials
 
 **Decision — hosts enroll through a short-lived UI-issued code.** The UI calls
