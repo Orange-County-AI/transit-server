@@ -244,20 +244,7 @@ func dispatchMCPTool(name string, raw json.RawMessage) (string, error) {
 		if err := decodeMCPArguments(raw, &args); err != nil {
 			return "", err
 		}
-		response, err := mcpCallAsPane(map[string]any{
-			"op": "rpc", "method": "read_message", "params": map[string]any{"id": args.ID},
-		})
-		if err != nil {
-			return "", err
-		}
-		if err := responseError(response); err != nil {
-			return "", err
-		}
-		text, ok := response["result"].(string)
-		if !ok {
-			return "", fmt.Errorf("read_message returned an invalid result")
-		}
-		return text, nil
+		return readMessageForMCP(args.ID)
 	case "chat_reply":
 		var args struct {
 			DeliveryID     string `json:"delivery_id"`

@@ -19,6 +19,7 @@ import troubleshootingMarkdown from "../docs/troubleshooting.md";
 import uiMarkdown from "../docs/ui.md";
 import { CONNECTORS } from "./connectors/registry";
 import { type AuthPluginFactory, auth, noAuthPlugins } from "./lib/better-auth";
+import { readAttachmentCapability } from "./lib/transit/attachment";
 
 import {
   AddressError,
@@ -74,8 +75,8 @@ import {
 } from "./services/directory";
 import { ServiceError } from "./services/errors";
 import { HostHub } from "./do/host-hub";
+import { HEALTH_CONFIG_FIELD, Integration } from "./do/integration";
 import { Room } from "./do/room";
-import { Integration } from "./do/integration";
 
 /**
  * Deployment-supplied behavior reaches the handlers below as a request
@@ -1544,7 +1545,7 @@ app.get("/api/integrations", async (context) => {
       .map((connector) => ({
         name: connector.name,
         mode: connector.mode,
-        configFields: connector.configFields,
+        configFields: [...connector.configFields, HEALTH_CONFIG_FIELD],
       })),
   });
 });
@@ -1869,6 +1870,28 @@ app.post("/api/deliveries/:id/handle", async (context) => {
     `org:${org}:integration:${integrationId}`,
   ).operatorMarkHandled(context.req.param("id"));
   return context.json(result);
+});
+
+app.get("/api/attachments", async (context) => {
+  const token = context.req.query("token");
+  if (!token) return context.text("Attachment not found", 404);
+  try {
+    const claims = await readAttachmentCapability(
+      token,
+      context.env.TRANSIT_MASTER_KEY,
+    );
+    const stub = context.env.INTEGRATION.getByName(
+      `org:${claims.org}:integration:${claims.integrationId}`,
+    );
+    const url = new URL("https://integration.invalid/attachment");
+    url.searchParams.set("event", claims.eventId);
+    url.searchParams.set("index", String(claims.index));
+    return await stub.fetch(new Request(url));
+  } catch {
+    return context.text("Attachment not found", 404, {
+      "cache-control": "private, no-store",
+    });
+  }
 });
 
 for (const connector of ["telegram", "kaneo"] as const) {

@@ -52,9 +52,7 @@ func TestIdentityIgnoresTheHarnessString(t *testing.T) {
 	}
 }
 
-// A declared name is the identity outright, so it must not collide with the
-// record the same agent left behind under an older key — which is exactly the
-// state every pod is in the first time it registers after this upgrade.
+// A declared name may absorb a stale record from the same pre-token identity.
 func TestDeclaredNameAdoptsAStaleRecordInsteadOfRefusing(t *testing.T) {
 	d := herdrlessDaemon(t)
 	d.nativeNames["omp:pre-upgrade-session"] = nativeName{Name: "clem", NamedBy: "user", Generation: 24}
@@ -73,26 +71,49 @@ func TestDeclaredNameAdoptsAStaleRecordInsteadOfRefusing(t *testing.T) {
 	}
 }
 
-// A declared name IS the identity, so a second client declaring one already in
-// use is the same agent reconnecting as far as the daemon can tell — a
-// relaunch and a misconfigured second launcher are the same two frames. It
-// takes the name over, and the adapter it displaces is disconnected rather
-// than left registered and silently undeliverable.
-func TestDeclaredNameTakesOverAndDisconnectsTheAdapterItDisplaces(t *testing.T) {
-	d := herdrlessDaemon(t)
-	path := serveHerdrlessAdapters(t, d)
-	first := connectAdapter(t, path, "omp", "session-1", "clem")
-	second := connectAdapter(t, path, "claude", "session-2", "clem")
+func TestDeclaredNameDoesNotDisplaceAnotherLivePane(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{
+		{Name: "stub", Kind: "omp", PaneID: "pane-1"},
+		{Name: "status-overlay", Kind: "omp", PaneID: "pane-4"},
+	}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	setAdapterTestHerdrAgents(d, agents)
+	first := registerAdapterDirect(t, d, agentFrame{
+		Harness: "omp", SessionID: "session-1", PaneID: "pane-1", Name: "stub",
+	})
+	helper := registerAdapterDirect(t, d, agentFrame{
+		Harness: "omp", SessionID: "session-2", PaneID: "pane-4", Name: "stub",
+	})
 
-	if second.name != "clem" {
-		t.Fatalf("second registration = %q; want the declared name", second.name)
+	if helper.name != "status-overlay" || helper.anchor != "session" {
+		t.Fatalf("helper = %q/%q; want its pane identity, not the inherited configured name", helper.name, helper.anchor)
 	}
-	if _, err := first.reader.ReadBytes('\n'); err == nil {
-		t.Fatal("the displaced adapter is still connected, so it would look alive and receive nothing")
+	if d.nativeAdapterByName(defaultEnrollment, "stub") != first {
+		t.Fatal("the helper displaced the live stub adapter")
 	}
-	adapter := d.nativeAdapterByName(defaultEnrollment, "clem")
-	if adapter == nil || adapter.sessionID != "session-2" {
-		t.Fatalf("clem routes to %#v; want the session that took the name", adapter)
+}
+
+func TestConfiguredNameDoesNotOverrideAValidIdentityToken(t *testing.T) {
+	d := herdrlessDaemon(t)
+	stub := registerAdapterDirect(t, d, agentFrame{
+		Harness: "omp", SessionID: "stub-session", Name: "stub",
+	})
+	helper := registerAdapterDirect(t, d, agentFrame{
+		Harness: "omp", SessionID: "helper-session",
+	})
+	if _, err := d.claimNativeAdapterName(helper, "status-overlay"); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed := registerAdapterDirect(t, d, agentFrame{
+		Harness: "omp", SessionID: "helper-resumed", Name: "stub", AgentToken: helper.token,
+	})
+	if resumed.name != "status-overlay" || resumed.anchor != "token" {
+		t.Fatalf("resumed helper = %q/%q; want token-owned status-overlay identity", resumed.name, resumed.anchor)
+	}
+	if d.nativeAdapterByName(defaultEnrollment, "stub") != stub {
+		t.Fatal("the resumed helper displaced stub despite presenting its own token")
 	}
 }
 

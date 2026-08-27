@@ -125,6 +125,7 @@ type agentAdapter struct {
 	key        string
 	harness    string
 	sessionID  string
+	paneID     string
 	pid        int
 	pidStart   uint64
 	cwd        string
@@ -547,19 +548,15 @@ func (adapter *agentAdapter) failWaiters() {
 // checked now, so the value stays safe to print and to compare.
 var harnessPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
-// adapterKeyLocked resolves which identity a registration belongs to. Harness
-// is deliberately absent: it used to be half the key, so a client that
-// reported itself differently — or was simply wrong about what it was —
-// became a different agent. Session id is the last resort rather than the
-// rule, because OMP mints a fresh one on every `--resume`, which is why one
-// agent wore three addresses in a single afternoon.
-// Keys are prefixed with the organization: `clem` in one is not `clem` in
-// another, and a flat namespace would let a registration in one organization
-// inherit a record from the other.
+// adapterKeyLocked resolves which identity a registration belongs to. A token
+// the daemon issued is authoritative even when a workspace-wide launcher also
+// declares a default name: every helper process inherits that environment, but
+// only the resumed identity owns its token.
+//
+// Harness is deliberately absent. Session id is the last resort because OMP
+// mints a fresh one on every `--resume`. Keys are prefixed with the organization
+// so equal names in separate organizations remain separate identities.
 func (d *Daemon) adapterKeyLocked(frame agentFrame, enrollment string) (key, anchor string) {
-	if frame.Name != "" {
-		return enrollment + "|name:" + frame.Name, "name"
-	}
 	if frame.AgentToken != "" {
 		if stored, found := d.nativeTokens[frame.AgentToken]; found {
 			// A token issued to one organization cannot resolve an identity in
@@ -568,6 +565,9 @@ func (d *Daemon) adapterKeyLocked(frame agentFrame, enrollment string) (key, anc
 				return stored, "token"
 			}
 		}
+	}
+	if frame.Name != "" {
+		return enrollment + "|name:" + frame.Name, "name"
 	}
 	return enrollment + "|session:" + frame.SessionID, "session"
 }
@@ -600,12 +600,10 @@ func (d *Daemon) paneAgentForRegistration(paneID string) (HerdrAgent, bool) {
 	return *agent, true
 }
 
-// absorbNameLocked takes over the records some earlier incarnation of this
-// same agent left holding `name`, folding their generation and identity
-// credential into this one and displacing any adapter still registered under
-// them. Two things establish "same agent": a launcher declaring the name, and
-// a client presenting the pane the name belongs to. Anything else is a
-// genuine collision and is caught later by the live-adapter check.
+// absorbNameLocked folds stale records for this identity into its current key.
+// A live adapter is only eligible after registration has proved it occupies the
+// same pane or presented the same daemon-issued token. That check happens
+// before this helper; a workspace-wide declared name alone is not identity.
 func (d *Daemon) absorbNameLocked(
 	key, name, enrollment string, record nativeName, displaced []*agentAdapter,
 ) (nativeName, []*agentAdapter) {
@@ -654,20 +652,35 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	defer d.mu.Unlock()
 
 	key, anchor := d.adapterKeyLocked(frame, enrollment)
+	// A configured name is a bootstrap hint, not authority over an identity
+	// recovered by token. This is what keeps a resumed helper that inherited
+	// TRANSIT_AGENT_NAME=stub attached to its own status-overlay identity.
+	if anchor == "token" {
+		frame.Name = ""
+	}
+	// Two live sessions in one workspace inherit the same configured name.
+	// Never let the later helper evict the target merely by declaring it. A
+	// different named pane supplies the helper's real identity; without that
+	// evidence, refuse and retry rather than route customer traffic silently.
+	if anchor == "name" {
+		if held := d.nativeAdapterLocked(enrollment, frame.Name); held != nil &&
+			held.sessionID != frame.SessionID && held.paneID != frame.PaneID {
+			if hasPaneAgent && paneAgent.Name != "" && paneAgent.Name != frame.Name {
+				frame.Name = ""
+				key, anchor = d.adapterKeyLocked(frame, enrollment)
+			} else {
+				return nil, "name_taken", "declared name is already registered by another pane"
+			}
+		}
+	}
 	nameRecord, hasName := d.nativeNames[key]
 	nameRecord.Enrollment = enrollment
-	// displaced are the adapters this registration takes over from: the same
-	// identity reconnecting, and — for a declared name — the older keys that
-	// held that name before the launcher started declaring it.
+	// displaced are prior connections for the identity proved above.
 	displaced := []*agentAdapter{}
 	if old := d.adapters[key]; old != nil {
 		displaced = append(displaced, old)
 	}
 	if frame.Name != "" {
-		// The declared name IS the identity, so a record holding it under some
-		// other key is a previous incarnation of this same agent: a session
-		// that has since been resumed, or a record written before the upgrade
-		// when the key was harness and session id.
 		nameRecord, displaced = d.absorbNameLocked(key, frame.Name, enrollment, nameRecord, displaced)
 		nameRecord.Name = frame.Name
 		nameRecord.NamedBy = "user"
@@ -729,9 +742,10 @@ func (d *Daemon) registerAgentAdapter(frame agentFrame, pid int, start uint64, c
 	generation := nameRecord.Generation + 1
 	nameRecord.Generation = generation
 	adapter := &agentAdapter{
-		key: key, harness: frame.Harness, sessionID: frame.SessionID, pid: pid, pidStart: start,
-		cwd: frame.CWD, title: frame.Title, status: frame.Status, name: nameRecord.Name, namedBy: nameRecord.NamedBy,
-		generation: generation, capability: capability, anchor: anchor, token: nameRecord.Token,
+		key: key, harness: frame.Harness, sessionID: frame.SessionID, paneID: frame.PaneID,
+		pid: pid, pidStart: start, cwd: frame.CWD, title: frame.Title, status: frame.Status,
+		name: nameRecord.Name, namedBy: nameRecord.NamedBy, generation: generation,
+		capability: capability, anchor: anchor, token: nameRecord.Token,
 		enrollment: enrollment, connection: connection, waiters: make(map[string]chan agentDeliveryOutcome),
 	}
 	if held := d.nativeAdapterLocked(enrollment, nameRecord.Name); held != nil && !containsAdapter(displaced, held) {

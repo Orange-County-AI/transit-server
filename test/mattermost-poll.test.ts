@@ -130,20 +130,30 @@ describe("Mattermost polling integration", () => {
   });
 
   it("delivers an unread direct message to the target agent on the next alarm", async () => {
-    // Unread from the outset: the backlog that predates enrolment must be
-    // skipped, not replayed.
+    // A newly discovered DM channel gets a two-minute lookback so its first
+    // message is not dropped. Older backlog is still skipped.
+    const oldPostAt = Date.now() - 10 * 60_000;
     state.channels = [{ id: "c1", type: "D", total_msg_count: 4 }];
     state.members = [{ channel_id: "c1", msg_count: 0, mention_count: 0 }];
+    state.posts = {
+      old: {
+        id: "old",
+        channel_id: "c1",
+        user_id: "u-9",
+        message: "old backlog",
+        create_at: oldPostAt,
+        update_at: oldPostAt,
+      },
+    };
     const integration = await configuredMattermost();
 
-    // First alarm plants the cursor and fetches nothing.
     await runDurableObjectAlarm(integration);
     expect(
       await runInDurableObject(integration, async (_instance, store) =>
         [...(await store.storage.list({ prefix: "delivery:" }))].length,
       ),
     ).toBe(0);
-    expect(connectorCalls.some((call) => call.url.includes("/posts"))).toBe(false);
+    expect(connectorCalls.some((call) => call.url.includes("/posts"))).toBe(true);
 
     const cursor = await runInDurableObject(integration, async (_instance, store) =>
       store.storage.get<number>("cx:cursor:c1"),

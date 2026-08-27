@@ -2,9 +2,11 @@ import {
   env,
   runDurableObjectAlarm,
   runInDurableObject,
+  SELF,
 } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Integration } from "../src/do/integration";
+import { readAttachmentCapability } from "../src/lib/transit/attachment";
 import {
   connectorCalls,
   onConnectorFetch,
@@ -87,6 +89,193 @@ describe("Integration engine", () => {
         ),
     );
     expect(delivery).toMatchObject({ attempts: 1, status: "dispatched" });
+  });
+
+  it("returns short-lived attachment capabilities without exposing connector credentials", async () => {
+    const integration = await configuredIntegration();
+    const ingested = await integration.ingestEvent({
+      eventKey: "update:attachment",
+      conversationId: "chat-attachment",
+      user: "Ada",
+      content: "review the file",
+      meta: { chat_id: "42" },
+      attachments: [
+        {
+          id: "upstream-file-1",
+          name: "brief.pdf",
+          contentType: "application/pdf",
+          size: 3,
+        },
+      ],
+    });
+    const result = await integration.readMessageV2(
+      ingested.deliveryId,
+      "alice@alpha",
+    );
+    expect(result.text).toContain("review the file");
+    expect(result.attachments).toHaveLength(1);
+    const url = new URL(result.attachments[0]!.url);
+    expect(url.origin).toBe(new URL(env.BETTER_AUTH_URL).origin);
+    expect(url.pathname).toBe("/api/attachments");
+    const token = url.searchParams.get("token");
+    expect(token).toBeTruthy();
+    const claims = await readAttachmentCapability(
+      token!,
+      env.TRANSIT_MASTER_KEY,
+    );
+    expect(claims).toMatchObject({
+      org: ORG,
+      integrationId: INTEGRATION_ID,
+      eventId: ingested.eventId,
+      deliveryId: ingested.deliveryId,
+      index: 0,
+    });
+    expect(result.attachments[0]).not.toHaveProperty("id");
+  });
+
+  it("streams a capability-authorized attachment through its connector", async () => {
+    onConnectorFetch(
+      "GET",
+      (url) => url.hostname === "mm.example" && url.pathname === "/api/v4/users/me",
+      () => Response.json({ id: "bot-1", username: "transit" }),
+    );
+    onConnectorFetch(
+      "GET",
+      (url) =>
+        url.hostname === "mm.example" &&
+        url.pathname === "/api/v4/files/file-1",
+      () =>
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: {
+            "content-type": "application/pdf",
+            "content-length": "3",
+          },
+        }),
+    );
+    const integrationID = "int_attachmentmm";
+    const integration = env.INTEGRATION.getByName(
+      `org:${ORG}:integration:${integrationID}`,
+    );
+    const host = env.HOST_HUB.getByName(`org:${ORG}:host:alpha`);
+    await runInDurableObject(host, async (_instance, state) => {
+      await state.storage.put("roster:alice", {
+        name: "alice",
+        kind: "omp",
+        pane_id: "alpha:p1",
+        status: "idle",
+        cwd: "/work",
+        title: "Alice",
+        named_by: "user",
+      });
+    });
+    await integration.configure({
+      org: ORG,
+      id: integrationID,
+      connector: "mattermost",
+      name: "attachment-mattermost",
+      targetAddr: "alice@alpha",
+      config: {
+        server_url: "https://mm.example",
+        bot_token: "secret-token",
+      },
+    });
+    const ingested = await integration.ingestEvent({
+      eventKey: "mattermost:file-1",
+      conversationId: "channel:root",
+      content: "review this",
+      meta: { channel_id: "channel", post_id: "post" },
+      attachments: [
+        {
+          id: "file-1",
+          name: "brief.pdf",
+          contentType: "application/pdf",
+          size: 3,
+        },
+      ],
+    });
+    const read = await integration.readMessageV2(
+      ingested.deliveryId,
+      "alice@alpha",
+    );
+    const capability = new URL(read.attachments[0]!.url).searchParams.get(
+      "token",
+    );
+    const response = await SELF.fetch(
+      `https://transit.test/api/attachments?token=${encodeURIComponent(
+        capability!,
+      )}`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/pdf");
+    expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([1, 2, 3]);
+  });
+
+  it("heartbeats only while the connector and named target are healthy", async () => {
+    const integrationID = "int_health001122";
+    const host = env.HOST_HUB.getByName(`org:${ORG}:host:alpha`);
+    await runInDurableObject(host, async (_instance, state) => {
+      await state.storage.put("roster:alice", {
+        name: "alice",
+        kind: "omp",
+        pane_id: "alpha:p1",
+        status: "idle",
+        cwd: "/work",
+        title: "Alice",
+        named_by: "user",
+      });
+    });
+    const integration = env.INTEGRATION.getByName(
+      `org:${ORG}:integration:${integrationID}`,
+    );
+    await integration.configure({
+      org: ORG,
+      id: integrationID,
+      connector: "telegram",
+      name: "test-telegram-health",
+      targetAddr: "alice@alpha",
+      config: {
+        bot_token: "123:test",
+        webhook_secret: "webhook-secret",
+        allowed_user_ids: "42",
+        health_ping_url: "https://monicron.example/heartbeat/token",
+      },
+    });
+    await runInDurableObject(integration, async (_instance, state) => {
+      await state.storage.put("connectorStatus", {
+        state: "webhook",
+        updatedAt: Date.now(),
+      });
+      await state.storage.delete("health:last_ping");
+    });
+    onConnectorFetch(
+      "POST",
+      (url) => url.hostname === "monicron.example",
+      () => new Response(null, { status: 204 }),
+    );
+    await runInDurableObject(integration, async (instance) => {
+      await (instance as Integration).alarm();
+    });
+    expect(
+      connectorCalls.filter((call) =>
+        call.url.startsWith("https://monicron.example/heartbeat/"),
+      ),
+    ).toHaveLength(1);
+
+    await runInDurableObject(host, async (_instance, state) => {
+      await state.storage.delete("roster:alice");
+    });
+    await runInDurableObject(integration, async (_instance, state) => {
+      await state.storage.delete("health:last_ping");
+    });
+    await runInDurableObject(integration, async (instance) => {
+      await (instance as Integration).alarm();
+    });
+    expect(
+      connectorCalls.filter((call) =>
+        call.url.startsWith("https://monicron.example/heartbeat/"),
+      ),
+    ).toHaveLength(1);
+    await integration.pause(true);
   });
 
   it("marks read, records a reply before posting, and retries the same reply", async () => {
@@ -175,7 +364,11 @@ describe("Integration engine", () => {
     );
     expect(settled?.status).toBe("handled");
     expect(settled?.settledAt).toBeTypeOf("number");
-    expect(connectorCalls.at(-1)?.body).toContain("recorded answer");
+    expect(
+      connectorCalls.findLast((call) =>
+        call.url.startsWith("https://api.telegram.org/"),
+      )?.body,
+    ).toContain("recorded answer");
   });
 
   it("enforces ownership and pause", async () => {

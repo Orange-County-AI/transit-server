@@ -69,12 +69,30 @@ in a chain that was exploitable together:
 refresh token included, to any holder of the one-hour access token; Transit
 reads that session in process and never over HTTP.
 
-**Not yet implemented, and deployment configuration rather than code:** neither
-`POST /oauth/token` nor an unauthenticated `POST /mcp` is rate limited. A Worker
-has no shared counter without adding a Durable Object hop to every
-unauthenticated request, which is itself an amplifier, so this belongs in a
-Cloudflare rate-limiting rule at the edge. A hosted deployment should configure
-one; a self-hoster should know it is absent.
+**Edge rate limiting, deployment configuration rather than code.** A Worker has
+no shared counter without adding a Durable Object hop to every unauthenticated
+request, which is itself an amplifier, so this belongs in a Cloudflare
+rate-limiting rule. The hosted deployment runs one on the zone: 50 requests per
+10 s per IP, blocking for 10 s, matching `/oauth/token` and `/api/auth/mcp/*`.
+A self-hoster without an equivalent rule should know it is absent.
+
+Two things about that rule are worth copying rather than rediscovering.
+
+`POST /mcp` is deliberately **excluded**. Counting characteristics below the
+Business plan are IP-only, and a fleet behind one NAT egress — measured here as
+titan and every workspace pod sharing a single address — is indistinguishable
+from one client to a per-IP counter. A threshold low enough to blunt a flood on
+the agent data path is a threshold the fleet can trip by itself. The auth
+endpoints are safe to limit because their legitimate rate is one token refresh
+per agent per hour, four orders of magnitude below the limit.
+
+The rule expression may only reference **Path** on a Free plan. An expression
+using `http.host` is accepted by the API without error, deploys, reports
+`enabled: true`, and matches nothing — plan availability is not validated at
+write time. Only a test that drove real traffic past the threshold and observed
+`429` with `content-type: text/html` (Cloudflare's page, not Transit's JSON
+error) distinguished a working rule from an inert one that looked identical in
+every API response.
 
 Each public `transit.ingest/1` source has its own HMAC secret. The Worker verifies
 the per-source HMAC and timestamp window before processing an ingress request.

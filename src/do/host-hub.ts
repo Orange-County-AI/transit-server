@@ -1465,14 +1465,18 @@ export class HostHub extends DurableObject<Env> {
   ): Promise<unknown> {
     {
       let result: unknown;
-      if (method === "read_message") {
+      if (method === "read_message" || method === "read_message_v2") {
         if (typeof params.id !== "string") throw new Error("id is required");
         if (params.id.startsWith("dlv_")) {
           const caller = await this.rpcCaller(identity, params, options);
           const integrationId = await this.integrationForDelivery(identity.org, params.id);
-          result = await this.env.INTEGRATION.getByName(
+          const integration = this.env.INTEGRATION.getByName(
             `org:${identity.org}:integration:${integrationId}`,
-          ).readMessage(params.id, caller);
+          );
+          result =
+            method === "read_message_v2"
+              ? await integration.readMessageV2(params.id, caller)
+              : await integration.readMessage(params.id, caller);
         } else {
           const row = await this.env.DB.prepare(
             `SELECT id, from_addr, body FROM message
@@ -1481,7 +1485,7 @@ export class HostHub extends DurableObject<Env> {
             .bind(params.id, identity.org, identity.org)
             .first<{ id: string; from_addr: string; body: string }>();
           if (!row) throw new Error("message not found");
-          result = renderFull({
+          const text = renderFull({
             id: row.id,
             conversationId: row.id,
             user: row.from_addr,
@@ -1491,6 +1495,10 @@ export class HostHub extends DurableObject<Env> {
             settled: true,
             body: row.body,
           });
+          result =
+            method === "read_message_v2"
+              ? { text, attachments: [] }
+              : text;
         }
       } else if (method === "chat_reply") {
         if (

@@ -1,19 +1,23 @@
 # Integrations
 
-An integration turns external events into channel deliveries for one `target_addr`: either an agent address (`name@host`) or a room (`#room`). Open **Integrations**, choose **Add integration**, select a connector, supply its configuration, and select the route. The detail page lets you save changes, pause or resume intake, and delete the integration.
+An integration turns external events into channel deliveries for one `target_addr`: either an agent address (`name@host`) or a room (`#room`). Open **Integrations**, choose **Add integration**, select a connector, supply its configuration, and select the route. The detail page lets you save changes, pause or resume intake, and delete the integration. Every connector also accepts an optional HTTPS health-heartbeat URL.
 
-Secret fields are write-only. After saving, Transit displays only a `sha256:` fingerprint; enter a new value to rotate a secret. Configuration is encrypted before durable storage.
+Secret fields, including the heartbeat URL, are write-only. After saving, Transit displays only a `sha256:` fingerprint; enter a new value to rotate a secret. Configuration is encrypted before durable storage.
 
 ## Built-in connectors
 
 | Connector | Supply | How it receives and responds |
 | --- | --- | --- |
-| Mattermost | Server URL, bot token, optional bot user ID, default reply mode, and optional agent instructions. | Maintains an outbound WebSocket; it receives direct messages, mentions, and followed threads, then posts through the Mattermost API. `reply_mode` can be `root` or `thread`. |
-| Gmail | Mailbox address, OAuth client ID, client secret, refresh token, optional required/excluded labels, poll interval, and optional instructions. | Polls the Gmail History API and replies in the original email thread. |
+| Mattermost | Server URL, bot token, optional bot user ID, default reply mode, and optional agent instructions. | Polls unread posts for direct messages, mentions, and followed threads, then posts through the Mattermost API. `reply_mode` can be `root` or `thread`. |
+| Gmail | Mailbox address, service-account JSON or OAuth credentials, optional required/excluded labels, poll interval, and optional instructions. | Polls the Gmail History API and replies in the original email thread. |
 | Telegram | Bot token, webhook secret, allowed user IDs and/or chat IDs, optional group-mention setting, and optional instructions. | The detail page provides its webhook URL. Telegram must send the configured secret in `X-Telegram-Bot-Api-Secret-Token`. |
 | Kaneo | API base, bot key, webhook secret, optional workspace ID, bot actor, and optional instructions. | The detail page provides its webhook URL. Kaneo signs inbound webhooks with `x-kaneo-signature`; replies are posted as task comments. |
 
 A Telegram configuration must allow at least one user ID or chat ID before it accepts events. Pausing an integration stops its connector; resuming it restarts the connector and dispatches due deliveries. Deleting an integration permanently removes connector state and its unsettled ledger.
+
+Mattermost and Gmail preserve attachments. The connector records bounded file metadata with the event but keeps bytes behind its upstream credential. When a daemon-backed agent calls `read_message`, Transit issues short-lived capabilities, downloads each file immediately into `~/.local/share/transit/attachments/<delivery>/`, and returns those local paths with the full message. Files are mode `0600`, capped at 100 MiB each, cached for repeated reads, and reaped after seven days. Connector credentials never leave the Worker.
+
+An integration with a health-heartbeat URL posts at most once per minute, and only while both conditions are true: the connector state is healthy and the configured named agent is present in its host roster. A missing agent or failed connector therefore expires the heartbeat rather than reporting a false healthy state. Polling and webhook alarms continue their normal self-recovery whether or not monitoring is configured.
 
 Both plans include unlimited integrations. Each unique external event and each reply posted back to an external conversation counts toward the organization's combined monthly message allowance. Duplicate events and delivery retries do not count again. See [Accounts](accounts.md).
 
