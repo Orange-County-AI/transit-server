@@ -260,15 +260,34 @@ func (d *Daemon) statusResponse() map[string]any {
 	return success(response)
 }
 
+// pauseResponse toggles host-wide delivery.
+//
+// IT LOGS, and that is the point of the extra lines. A pause silences every
+// adapter on the box at once while leaving each one registered, connected and
+// reporting a current `updated_at`, so every liveness instrument reads healthy
+// while deliveries pile up plane-side with `via` unset. On 2026-08-27 that
+// state held titan for 84 minutes: nothing recorded that the flag had moved,
+// and the only witness was a `transit status` nobody had reason to run. A
+// state that can stop an entire host belongs in the journal, with the number
+// of adapters it affects.
 func (d *Daemon) pauseResponse(request map[string]any) map[string]any {
 	d.mu.Lock()
+	previous := d.paused
 	if toggle, _ := request["toggle"].(bool); toggle {
 		d.paused = !d.paused
 	} else if paused, ok := request["paused"].(bool); ok {
 		d.paused = paused
 	}
 	paused := d.paused
+	adapters := len(d.adapters)
 	d.mu.Unlock()
+	if paused != previous {
+		if paused {
+			d.logf("delivery PAUSED host-wide; %d registered adapters receive nothing until resumed", adapters)
+		} else {
+			d.logf("delivery resumed host-wide; %d registered adapters eligible again", adapters)
+		}
+	}
 	if !paused {
 		d.notifyOutbox()
 	}
