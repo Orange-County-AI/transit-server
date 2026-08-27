@@ -285,10 +285,12 @@ other harness.** Herdr injection drives a PTY: it needs `herdr.service`, reads
 the pane to protect a supported composer's unsent draft, targets a terminal
 container rather than a session, and cannot tell a resumed session from a new
 one. Native harnesses can identify the session that owns a delivery, avoiding
-those PTY identity failures, but they are not composer-guarded: a native adapter
-registers a harness session rather than a pane, and no harness API exposes
-composer state. A native delivery can therefore steer into the session while a
-person is composing.
+those PTY identity failures, and are composer-guarded against the pane the
+adapter declared at registration rather than the synthetic `native:` pane id on
+its roster entry. An adapter that declared no pane is headless and delivers
+unguarded; one whose declared pane cannot be read holds with retryable
+`draft_busy`, because a pane that cannot be checked is not a pane that has no
+composer.
 
 The socket is `<data dir>/agent.sock`, mode 0600, newline-delimited JSON,
 persistent and bidirectional — unlike the one-shot `transit.sock` used by the
@@ -315,8 +317,10 @@ adapter, which is what lets `send_message` work with `herdr.service` stopped.
 **Decision — a write is not an acknowledgement.** Claude's monitor writes the
 envelope to stdout and only acks once the delivery id appears in the session's
 `transcript_path`; on timeout it sends a retryable `deliver_nak`. OMP and Pi
-persist a receipt with `pi.appendEntry` after `pi.sendUserMessage` and rebuild
-the receipt set from the session branch on resume. OpenCode injects through
+persist a receipt with `pi.appendEntry` after `pi.sendMessage(..., { deliverAs:
+"nextTurn", triggerTurn: true })` — the hidden mode, which keeps the envelope
+out of the editable composer while still starting a turn on an idle session —
+and rebuild the receipt set from the session branch on resume. OpenCode injects through
 `session.promptAsync` and only acks after `session.messages` contains the
 delivery id; that persisted user message is its resume receipt. **Rationale:**
 acking before persistence drops a message in the write-to-disk gap;

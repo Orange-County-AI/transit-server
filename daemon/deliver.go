@@ -89,10 +89,34 @@ func (d *Daemon) deliverOnce(ctx context.Context, e *enrollmentRuntime, frame Wi
 		// first; the native path skipped the check because it never types, and
 		// `require` mode makes this the only path a fleet agent has. So the
 		// same hold runs here, using the pane the adapter's agent occupies.
-		// An adapter with no Herdr pane cannot be checked and delivers as
-		// before: fail-open matches the guard's existing one-sided contract.
+		// An adapter with no Herdr pane at all cannot be checked and delivers
+		// as before: fail-open matches the guard's existing one-sided
+		// contract.
 		if draftGuardEnabled() {
-			if agent, found := d.localAgentByName(frame.Agent); found && agent.PaneID != "" {
+			agent, readable, occupied := d.adapterPaneAgent(adapter, frame.Agent)
+			switch {
+			case !occupied:
+				// Headless. No terminal, no composer, nothing to clobber.
+			case !readable:
+				// The adapter says it occupies a pane and this daemon cannot
+				// read that pane — Herdr is down, or Herdr does not report the
+				// pane as an agent. "Cannot check" is not the same fact as
+				// "there is no composer", and until now the guard spelled them
+				// the same way and delivered. A declared pane means a person
+				// may be typing into it this second, and an injection landing
+				// on unsent input destroys it, so the delivery waits for a
+				// pane it can actually judge.
+				//
+				// It waits as `draft_busy` rather than a new code because that
+				// is the one nak the HostHub treats as a hold: the entry keeps
+				// its attempt count instead of burning one of its 40, so a
+				// Herdr restart cannot kill a queued message. No local hold is
+				// recorded — a hold exists to be watched, and there is nothing
+				// readable here to watch — so the Worker's own backstop alarm
+				// and the next roster snapshot drive the retry.
+				return "draft_busy", true, fmt.Errorf(
+					"composer state for %s is unreadable in pane %s", frame.Agent, adapter.paneID)
+			default:
 				if d.composerState(ctx, agent, frame.Envelope) == composerForeignDraft {
 					hold := draftHold{PaneID: agent.PaneID, Agent: agent.Kind, At: time.Now().UTC()}
 					d.applyDraftHold(ctx, hold)
@@ -209,6 +233,43 @@ func (d *Daemon) deliveryLanded(ctx context.Context, agent HerdrAgent, id string
 		}
 	}
 	return current.StateChangeSeq != before
+}
+
+// adapterPaneAgent resolves the Herdr pane a native adapter occupies.
+//
+// The guard used to ask `localAgentByName(frame.Agent)` for it, which is the
+// wrong key. A transit name is claimed independently of the pane's Herdr name
+// — a launcher's TRANSIT_AGENT_NAME, a daemon auto-name, a later claim_name —
+// so the two coincide only by luck, and the roster the Worker sees carries a
+// synthetic `native:<harness>:<session>` pane id that is not a readable pane at
+// all. Every miss fell through to "no pane, deliver anyway", so on a natively
+// registered OMP session the draft guard was never running, which is how an
+// injection reached a person mid-keystroke on 2026-08-27.
+//
+// The adapter declares the real pane itself at registration, from
+// HERDR_PANE_ID. That is the key. `occupied` reports whether this adapter is
+// attached to a terminal at all; `readable` whether that terminal resolved to a
+// Herdr agent whose screen can be judged. The two are separate answers on
+// purpose: a headless adapter has no composer to protect, an unreadable one has
+// a composer nobody can see.
+func (d *Daemon) adapterPaneAgent(adapter *agentAdapter, name string) (agent HerdrAgent, readable, occupied bool) {
+	// paneID is written once when the adapter is constructed and never
+	// mutated, so it is read the same way deliverNative reads the connection.
+	if adapter.paneID != "" {
+		// Roster first, then Herdr directly: the cached roster is a snapshot
+		// and is empty for the first one after a restart, which is exactly
+		// when every adapter reconnects at once.
+		agent, found := d.paneAgentForRegistration(adapter.paneID)
+		return agent, found && agent.PaneID != "", true
+	}
+	// No declared pane. An older extension, or a harness with no terminal. The
+	// name lookup is the pre-existing behavior and a hit is still a real pane,
+	// so it is kept rather than dropped.
+	agent, found := d.localAgentByName(name)
+	if found && agent.PaneID != "" {
+		return agent, true, true
+	}
+	return HerdrAgent{}, false, false
 }
 
 type composerVerdict int

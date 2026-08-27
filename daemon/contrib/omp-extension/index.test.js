@@ -4,7 +4,7 @@ import net from "node:net";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
-import { IDENTITY_ENTRY_TYPE, RECEIPT_ENTRY_TYPE, TransitClient } from "./index.js";
+import { DELIVERY_MESSAGE_TYPE, IDENTITY_ENTRY_TYPE, RECEIPT_ENTRY_TYPE, TransitClient } from "./index.js";
 
 const clients = [];
 const servers = [];
@@ -89,7 +89,7 @@ async function connectClient({ pi, branch, harness = "omp", withOmpTimers = true
 	const client = new TransitClient({
 		pi:
 			pi ?? {
-				sendUserMessage: () => {},
+				sendMessage: () => {},
 				appendEntry: () => {},
 			},
 		ctx: createContext(branch, withOmpTimers),
@@ -154,7 +154,7 @@ test("acks only after the receipt write resolves", async () => {
 	});
 	const { agent } = await connectClient({
 		pi: {
-			sendUserMessage: async (...args) => {
+			sendMessage: async (...args) => {
 				sent.push(args);
 			},
 			appendEntry: () => receiptWrite,
@@ -163,8 +163,11 @@ test("acks only after the receipt write resolves", async () => {
 	await register(agent);
 
 	agent.send({ t: "deliver", id: "tx-delivery-1", envelope: "<transit id=\"tx-delivery-1\"/>" });
-	await waitFor(() => sent.length === 1, "sendUserMessage call");
-	expect(sent).toEqual([["<transit id=\"tx-delivery-1\"/>", { deliverAs: "steer" }]]);
+	await waitFor(() => sent.length === 1, "injection call");
+	expect(sent).toEqual([[
+		{ customType: DELIVERY_MESSAGE_TYPE, content: "<transit id=\"tx-delivery-1\"/>", display: true, details: { id: "tx-delivery-1" } },
+		{ deliverAs: "nextTurn", triggerTurn: true },
+	]]);
 	expect(agent.frames.find(frame => frame.t === "deliver_ack")).toBeUndefined();
 
 	resolveReceipt();
@@ -181,7 +184,7 @@ test("returns a retryable NAK when persisting a receipt fails", async () => {
 	const sent = [];
 	const { agent } = await connectClient({
 		pi: {
-			sendUserMessage: async (...args) => {
+			sendMessage: async (...args) => {
 				sent.push(args);
 			},
 			appendEntry: () => {
@@ -193,7 +196,10 @@ test("returns a retryable NAK when persisting a receipt fails", async () => {
 
 	agent.send({ t: "deliver", id: "tx-delivery-2", envelope: "receipt failure" });
 	const nak = await waitFor(() => agent.frames.find(frame => frame.t === "deliver_nak"), "delivery NAK");
-	expect(sent).toEqual([["receipt failure", { deliverAs: "steer" }]]);
+	expect(sent).toEqual([[
+		{ customType: DELIVERY_MESSAGE_TYPE, content: "receipt failure", display: true, details: { id: "tx-delivery-2" } },
+		{ deliverAs: "nextTurn", triggerTurn: true },
+	]]);
 	expect(nak).toEqual({
 		t: "deliver_nak",
 		id: "tx-delivery-2",
@@ -208,7 +214,7 @@ test("re-acks a receipt found on the resumed session branch without injecting it
 	const { agent } = await connectClient({
 		branch: [{ type: "custom", customType: RECEIPT_ENTRY_TYPE, data: { id: "tx-received" } }],
 		pi: {
-			sendUserMessage: async (...args) => {
+			sendMessage: async (...args) => {
 				sent.push(args);
 			},
 			appendEntry: () => {
@@ -228,7 +234,7 @@ test("stores the identity token the daemon issues on the session branch", async 
 	const entries = [];
 	const { agent } = await connectClient({
 		pi: {
-			sendUserMessage: () => {},
+			sendMessage: () => {},
 			appendEntry: (type, data) => {
 				entries.push([type, data]);
 			},
@@ -267,4 +273,62 @@ test("registers a harness the extension does not know", async () => {
 
 	expect(frame.harness).toBe("acme-cli");
 	await register(agent);
+});
+
+// The regression this whole change exists for. `deliverAs: "steer"` put the
+// envelope in OMP's editable pending-message UI — the buffer a person types
+// into — and an arriving delivery discarded whatever draft was there. Any mode
+// but "nextTurn" is that bug, and any call to sendUserMessage is that bug
+// reached by another route, so both are asserted.
+test("keeps a delivery out of the editable composer and still wakes an idle agent", async () => {
+	const calls = [];
+	const { agent } = await connectClient({
+		pi: {
+			sendMessage: (message, options) => calls.push(["sendMessage", message, options]),
+			sendUserMessage: (content, options) => calls.push(["sendUserMessage", content, options]),
+			appendEntry: () => {},
+		},
+	});
+	await register(agent);
+
+	agent.send({ t: "deliver", id: "tx-quiet-1", envelope: "<transit id=\"tx-quiet-1\"/>" });
+	await waitFor(() => calls.length === 1, "an injection call");
+	await waitFor(() => agent.frames.find(frame => frame.t === "deliver_ack"), "delivery acknowledgement");
+
+	const [api, message, options] = calls[0];
+	expect(api).toBe("sendMessage");
+	expect(options.deliverAs).toBe("nextTurn");
+	// Quiet must not become never delivered: an idle session only starts a turn
+	// on a hidden message when triggerTurn is set.
+	expect(options.triggerTurn).toBe(true);
+	// Attribution stays OMP's "agent" default. Attributing to "user" makes the
+	// message user-restorable, which puts the envelope back in the composer on
+	// a queue clear or a dequeue — the clobber, one keystroke later.
+	expect(message.attribution).toBeUndefined();
+	expect(calls).toHaveLength(1);
+});
+
+// A build without the hidden delivery mode must fail visibly rather than
+// silently fall back to the composer. Not retryable: retrying cannot make an
+// older OMP grow the API, and the dead entry names the real problem.
+test("naks without retry when the harness cannot deliver out of the composer", async () => {
+	const { agent } = await connectClient({
+		pi: {
+			sendUserMessage: () => {},
+			appendEntry: () => {
+				throw new Error("no receipt should be written for an undeliverable message");
+			},
+		},
+	});
+	await register(agent);
+
+	agent.send({ t: "deliver", id: "tx-quiet-2", envelope: "<transit id=\"tx-quiet-2\"/>" });
+	const nak = await waitFor(() => agent.frames.find(frame => frame.t === "deliver_nak"), "delivery NAK");
+	expect(nak).toEqual({
+		t: "deliver_nak",
+		id: "tx-quiet-2",
+		code: "send_message_unsupported",
+		retryable: false,
+		capability: "0123456789abcdef0123456789abcdef",
+	});
 });
