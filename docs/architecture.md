@@ -512,6 +512,14 @@ minutes, from an agent draining a saturated input queue in timestamp-disordered
 order. Any alarm must place its threshold between those two observations, and
 neither figure is transferable to a fleet with different load.
 
+That observation carries one send, one arrival and no retry, so it says nothing
+about whether those two counters are well named: they agree because there was
+nothing for them to disagree about. The defect this section exists to guard
+against — a rendered composite summing dispatch intent with arrivals — is
+invisible in exactly this shape of delivery. A clean case does not test the
+thing that lies, and a passing measurement is when nobody checks what it failed
+to cover.
+
 ## Enrollment and device credentials
 
 **Decision — hosts enroll through a short-lived UI-issued code.** The UI calls
