@@ -506,6 +506,22 @@ settled  01:17:44.598Z   +32s   read to settlement
                           72s   end to end, sends 1, arrivals 1
 ```
 
+All three timestamps are control-plane values written by the same Worker, so
+the intervals are one clock subtracted from itself and carry no skew. That is
+worth stating because the tempting comparison — a host-side receipt against a
+control-plane `created_at` — is two clocks, and measured across one fleet on
+2026-08-28 those disagreed by up to 22 seconds in one direction on one host and
+2.4 seconds in the other on another. A receipt timestamped *before* the
+envelope it acknowledges is the giveaway. Any cross-clock figure must state the
+host's measured offset against the API's `Date` header first; within a single
+control-plane pair, no such caveat is needed.
+
+What these numbers do *not* measure is when the agent's harness surfaced the
+envelope. `read_at` is when the endpoint called `read_message`, which is a
+control-plane event; the gap between a delivery being handed to a harness and
+that harness promoting it into a turn is invisible here and can legitimately
+exceed a minute on a busy agent.
+
 A threshold in seconds would therefore fire on healthy traffic; minutes is
 generous. The longest legitimate settlement observed on the same fleet was 84
 minutes, from an agent draining a saturated input queue in timestamp-disordered
