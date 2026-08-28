@@ -507,14 +507,23 @@ settled  01:17:44.598Z   +32s   read to settlement
 ```
 
 All three timestamps are control-plane values written by the same Worker, so
-the intervals are one clock subtracted from itself and carry no skew. That is
-worth stating because the tempting comparison — a host-side receipt against a
-control-plane `created_at` — is two clocks, and measured across one fleet on
-2026-08-28 those disagreed by up to 22 seconds in one direction on one host and
-2.4 seconds in the other on another. A receipt timestamped *before* the
-envelope it acknowledges is the giveaway. Any cross-clock figure must state the
-host's measured offset against the API's `Date` header first; within a single
-control-plane pair, no such caveat is needed.
+the intervals are one clock subtracted from itself and carry no skew. State
+that, because the tempting comparison — a host-side receipt against a
+control-plane `created_at` — is two clocks. Measured on one fleet on
+2026-08-28, host and control plane agreed to within a second on the host that
+checked (three samples, 0.16s to 0.38s against the API's `Date` header) and
+the delivery path itself was sub-second across twelve consecutive deliveries
+spanning nineteen hours. A second host in the same fleet produced a receipt
+timestamped 2.4 seconds *before* the envelope it acknowledged, which is
+impossible as latency and is therefore the giveaway for an unsynchronised
+clock. Any cross-clock figure must state the host's measured offset first;
+within a single control-plane pair, no such caveat is needed.
+
+A stated send time is not a clock. On the same day a multi-second
+"creation to injection" interval was inferred fleet-wide, published, and
+retracted, because one side of the comparison was a human-typed estimate in
+prose formatted to look like telemetry. Timestamps that no instrument emitted
+cannot appear in a latency figure.
 
 What these numbers do *not* measure is when the agent's harness surfaced the
 envelope. `read_at` is when the endpoint called `read_message`, which is a
