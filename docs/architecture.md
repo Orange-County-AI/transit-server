@@ -495,6 +495,23 @@ belongs to the alarm author: one value has to hold for the busiest and the
 quietest integration in a fleet. It covers channel deliveries only — agent and
 room traffic carry no `read_at` or `settled_at` at all.
 
+**Measured healthy baseline for that threshold**, taken 2026-08-28 on the
+busiest agent in the fleet — one under enough load that its harness was
+visibly deferring tool calls — carrying a real human Mattermost DM end to end:
+
+```
+created  01:16:32.884Z
+read_at  01:17:12.227Z   +39s   arrival to endpoint read
+settled  01:17:44.598Z   +32s   read to settlement
+                          72s   end to end, sends 1, arrivals 1
+```
+
+A threshold in seconds would therefore fire on healthy traffic; minutes is
+generous. The longest legitimate settlement observed on the same fleet was 84
+minutes, from an agent draining a saturated input queue in timestamp-disordered
+order. Any alarm must place its threshold between those two observations, and
+neither figure is transferable to a fleet with different load.
+
 ## Enrollment and device credentials
 
 **Decision — hosts enroll through a short-lived UI-issued code.** The UI calls
