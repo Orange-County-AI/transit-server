@@ -512,8 +512,13 @@ that, because the tempting comparison — a host-side receipt against a
 control-plane `created_at` — is two clocks. Measured on one fleet on
 2026-08-28, host and control plane agreed to within a second on the host that
 checked (three samples, 0.16s to 0.38s against the API's `Date` header) and
-the delivery path itself was sub-second across twelve consecutive deliveries
-spanning nineteen hours. A second host in the same fleet produced a receipt
+the delivery path was sub-second across twelve consecutive deliveries spanning
+nineteen hours on one host, and sub-second in five of six arrivals on another
+— the sixth took 7.971 seconds from envelope to persisted write, between two
+hosts sharing one physical clock, with a same-sender control 137 seconds later
+at 0.125s. So the path is not systematically slow and is also not reliably
+sub-second: a single-digit-second outlier occurs and is not skew.
+A second host in the same fleet produced a receipt
 timestamped 2.4 seconds *before* the envelope it acknowledged, which is
 impossible as latency and is therefore the giveaway for an unsynchronised
 clock. Any cross-clock figure must state the host's measured offset first;
