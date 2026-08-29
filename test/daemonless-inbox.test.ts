@@ -298,3 +298,105 @@ describe("a daemonless agent can be reached", () => {
     socket.close(1000, "done");
   });
 });
+
+/**
+ * A roster publish says who is live. It does not say who has ceased to exist,
+ * and Transit spent a cutover treating the two as one thing.
+ *
+ * The daemon publishes the union of its Herdr panes and its native adapters. A
+ * restarting agent, a reopening pane and a terminating pod all drop names from
+ * that union, and `applyRoster` deleted every dropped name outright — so an
+ * agent whose only route was the roster became permanently unroutable the
+ * moment it blinked. Native adapters mint no `agent_client` row, so the roster
+ * IS their only route: six messages to one agent died `no_route` this way,
+ * during a fifteen-minute pod move, and `dead` is terminal.
+ */
+describe("an agent that leaves the roster keeps its address", () => {
+  async function publishRoster(
+    socket: WebSocket,
+    agents: Record<string, unknown>[],
+  ): Promise<void> {
+    const flushed = nextFrame(socket);
+    socket.send(JSON.stringify({ t: "roster", agents }));
+    socket.send(
+      JSON.stringify({ t: "rpc", rid: "flush", method: "list_agents", params: {} }),
+    );
+    expect(await flushed).toMatchObject({ t: "rpc_result", rid: "flush" });
+  }
+
+  it("is still deliverable after its host publishes an empty roster", async () => {
+    const cookie = await signUp("roster-departure@test.example");
+    const alpha = await enrollHost(cookie, "alpha");
+    const beta = await enrollHost(cookie, "beta");
+    const alphaSocket = await connectDaemon(alpha, "alice");
+    const betaSocket = await connectDaemon(beta, "bob");
+
+    // beta goes down the way a terminating pod does: its adapters deregister,
+    // its panes go away, and the last thing it publishes is an empty union.
+    // Nothing about this frame distinguishes it from "bob is gone forever".
+    await publishRoster(betaSocket, []);
+
+    const id = "tx_00d1e0a00001";
+    const ack = nextFrame(alphaSocket);
+    alphaSocket.send(
+      JSON.stringify({
+        t: "send",
+        id,
+        from: "alice@alpha",
+        to: "bob@beta",
+        body: "sent while your box was mid-move",
+        ts: "2026-08-29T12:21:55.000Z",
+      }),
+    );
+    // This is the line that was `send_nak` with `no_route`, six times, silently.
+    expect(await ack).toEqual({ t: "send_ack", id });
+
+    // And it is HELD rather than merely admitted: bob comes back and gets it.
+    await publishRoster(betaSocket, [
+      {
+        name: "bob",
+        kind: "omp",
+        pane_id: `${beta.host}:p1`,
+        status: "idle",
+        cwd: "/work/bob",
+        title: "bob",
+        named_by: "user",
+      },
+    ]);
+    const delivered = await nextFrame(betaSocket);
+    expect(delivered).toMatchObject({ t: "deliver", id, agent: "bob" });
+    expect(String(delivered.envelope)).toContain("sent while your box was mid-move");
+
+    alphaSocket.close(1000, "done");
+    betaSocket.close(1000, "done");
+  });
+
+  it("does not turn every name ever published into a permanent address", async () => {
+    const cookie = await signUp("roster-departure-bound@test.example");
+    const alpha = await enrollHost(cookie, "alpha");
+    await enrollHost(cookie, "beta");
+    const alphaSocket = await connectDaemon(alpha, "alice");
+
+    // beta never published `bob` at all, so the grace has nothing to grant and
+    // admission is unchanged. The widening is "was live recently", not "was
+    // named once by anybody".
+    const nak = nextFrame(alphaSocket);
+    alphaSocket.send(
+      JSON.stringify({
+        t: "send",
+        id: "tx_00d1e0a00002",
+        from: "alice@alpha",
+        to: "bob@beta",
+        body: "never existed",
+        ts: "2026-08-29T12:21:55.000Z",
+      }),
+    );
+    expect(await nak).toEqual({
+      t: "send_nak",
+      id: "tx_00d1e0a00002",
+      code: "no_route",
+    });
+
+    alphaSocket.close(1000, "done");
+  });
+});

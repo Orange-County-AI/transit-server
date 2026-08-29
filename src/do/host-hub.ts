@@ -288,6 +288,19 @@ export class HostHub extends DurableObject<Env> {
   }
 
   /**
+   * When this name was last on the roster and is not on it now.
+   *
+   * A roster publish is a snapshot of who is live, and a name leaves it for two
+   * indistinguishable reasons: the agent is gone, or the agent is restarting —
+   * an OMP `--resume`, a pane reopening, a pod on its way down. The publish
+   * cannot tell them apart and neither can this hub, so it keeps the address
+   * alive for as long as a delivery to it could survive anyway.
+   */
+  private async departedAt(name: string): Promise<number | undefined> {
+    return await this.ctx.storage.get<number>(`gone:${name}`);
+  }
+
+  /**
    * Whether a message addressed to this name has anywhere to land.
    *
    * A roster entry is one answer and it means "a daemon says this session is
@@ -301,8 +314,20 @@ export class HostHub extends DurableObject<Env> {
    * request and nothing outside it ever knew the address existed. Such an agent
    * can still send. It simply cannot be an address until somebody registers one.
    *
-   * The roster is checked first and answers from storage. D1 is consulted only
-   * on a miss — the path that used to return `no_route` immediately.
+   * A name that WAS on the roster within `DELIVERY_TTL_MS` is the third answer,
+   * and it exists because the second one is almost never populated: an agent
+   * that registered a native adapter never minted an `agent_client` row, so its
+   * only route was the roster, and a roster publish that omits it — which every
+   * restart and every terminating pod produces — used to make it permanently
+   * unroutable. Six messages to one agent died that way during a cutover.
+   *
+   * The window is `DELIVERY_TTL_MS` rather than a new constant on purpose: the
+   * address should outlive a departure by exactly as long as the queue would
+   * hold something for it. A shorter grace discards mail the queue would still
+   * have been carrying; a longer one keeps an address no delivery can use.
+   *
+   * The roster and the grace answer from storage. D1 is consulted only on a
+   * miss — the path that used to return `no_route` immediately.
    */
   private async canReceive(
     name: string,
@@ -310,6 +335,8 @@ export class HostHub extends DurableObject<Env> {
     host: string,
   ): Promise<boolean> {
     if (await this.hasAgent(name)) return true;
+    const departed = await this.departedAt(name);
+    if (departed !== undefined && Date.now() - departed < DELIVERY_TTL_MS) return true;
     return Boolean(
       await this.env.DB.prepare(
         `SELECT 1 AS present
@@ -689,16 +716,40 @@ export class HostHub extends DurableObject<Env> {
   private async applyRoster(identity: HostIdentity, agents: RosterAgent[]): Promise<void> {
     const previous = await this.ctx.storage.list<RosterAgent>({ prefix: "roster:" });
     const currentByPane = new Map(agents.map((agent) => [agent.pane_id, agent]));
+    const present = new Set(agents.map((agent) => agent.name));
     const renames = new Map<string, string>();
+    const departedAt = Date.now();
+    let departures = 0;
     for (const [key, oldAgent] of previous) {
       const current = currentByPane.get(oldAgent.pane_id);
       if (current && current.name !== oldAgent.name) renames.set(oldAgent.name, current.name);
       await this.ctx.storage.delete(key);
+      // A name this publish dropped keeps its address for DELIVERY_TTL_MS. The
+      // publish cannot say whether the agent is gone or restarting, and a
+      // terminating pod drops every name at once, so treating the omission as
+      // proof of absence is what made a returning agent permanently unroutable.
+      // A rename is not a departure: the queue moves to the new name below.
+      if (!present.has(oldAgent.name) && !renames.has(oldAgent.name)) {
+        await this.ctx.storage.put(`gone:${oldAgent.name}`, departedAt);
+        departures += 1;
+      }
     }
     if (agents.length > 0) {
       await this.ctx.storage.put(
         Object.fromEntries(agents.map((agent) => [`roster:${agent.name}`, agent])),
       );
+      // Back on the roster, so the grace is spent rather than merely unused.
+      await this.ctx.storage.delete(agents.map((agent) => `gone:${agent.name}`));
+    }
+    // Pruned on departure rather than on every publish: a roster arrives every
+    // few seconds and an agent leaves rarely, so this is the one moment the
+    // sweep is both needed and cheap.
+    if (departures > 0) {
+      const graves = await this.ctx.storage.list<number>({ prefix: "gone:" });
+      const expired = [...graves]
+        .filter(([, at]) => departedAt - at >= DELIVERY_TTL_MS)
+        .map(([key]) => key);
+      if (expired.length > 0) await this.ctx.storage.delete(expired);
     }
 
     if (renames.size > 0) {
