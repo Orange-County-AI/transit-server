@@ -1,12 +1,14 @@
 /**
  * The Transit tool surface, defined once for the server-side MCP endpoint.
  *
- * These names, descriptions and schemas are the same eleven the daemon's stdio
- * MCP server advertises (`daemon/mcp.go`), because an agent that moves from a
- * Herdr box to a bare one must not have to relearn the tools. The two servers
- * differ in exactly one place, and it is a fact about the transport rather than
- * about a tool: the stdio server pins the sender to the local session, while
- * this one pins it to the credential on the request.
+ * These names, descriptions and schemas are the same thirteen the daemon's
+ * stdio MCP server advertises (`daemon/mcp.go`), because an agent that moves
+ * from a Herdr box to a bare one must not have to relearn the tools. The two
+ * servers differ in exactly one place, and it is a fact about the transport
+ * rather than about a tool: the stdio server pins the sender to the local
+ * session, while this one pins it to the credential on the request.
+ *
+ * `test/mcp-parity.test.ts` is what holds the two lists equal.
  */
 
 export type ToolSchema = {
@@ -89,6 +91,22 @@ export const TRANSIT_TOOLS: ToolDefinition[] = [
       "message comes back until you call mark_handled with its id, so ignore " +
       "any id you have already acted on.",
     inputSchema: object({}),
+  },
+  {
+    name: "read_room",
+    description:
+      "Read a room you belong to: its members and its recent messages. Use it " +
+      "to catch up on a room whose fan-out you missed; it does not settle " +
+      "anything.",
+    inputSchema: object(
+      {
+        room: text(
+          "Room name, #room, or organization/#room for a connected organization's room.",
+        ),
+        limit: text("Optional message count; defaults to 200, capped at 500."),
+      },
+      "room",
+    ),
   },
   {
     name: "list_agents",

@@ -9,6 +9,10 @@ export default defineConfig(async () => {
   // workerd has no fs — read wrangler.jsonc here so the safeguard test can
   // inspect the prod fan-out surfaces (queues, services, DOs, ...) at runtime.
   const wranglerConfigSource = readFileSync(path.join(here, "wrangler.jsonc"), "utf8");
+  // Same reason: the daemon's stdio MCP server is Go, and `test/mcp-parity`
+  // compares its tool list against this Worker's. Go cannot be imported and
+  // workerd cannot read it, so the source is read here and passed in.
+  const daemonMcpSource = readFileSync(path.join(here, "daemon", "mcp.go"), "utf8");
 
   return {
     plugins: [
@@ -18,6 +22,7 @@ export default defineConfig(async () => {
           bindings: {
             TEST_MIGRATIONS: migrations,
             WRANGLER_CONFIG_SOURCE: wranglerConfigSource,
+            DAEMON_MCP_SOURCE: daemonMcpSource,
             // Better Auth secret + canonical URL. Tests send `Origin: http://localhost`
             // so Better Auth's CSRF check passes against this URL.
             BETTER_AUTH_SECRET: "test-secret-not-for-prod-aaaaaaaaaaaaaaaaaaaaaa",

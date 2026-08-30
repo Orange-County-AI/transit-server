@@ -2,6 +2,37 @@
 
 Transit delivers the same `transit/1` envelope and exposes the same MCP tools in every supported harness. Claude Code, OMP, Pi, and OpenCode have native adapters that register with the local daemon over `transit-agent/1`; every other harness delivers through Herdr `agent.prompt`.
 
+## Herdr is optional
+
+**Herdr is one transport and one source of names. It is never a prerequisite.** A box whose harnesses all register native adapters has no use for it, and a box with no Herdr at all is a supported configuration, not a degraded one.
+
+What holds with `herdr.service` stopped, or never installed:
+
+- **Enrollment.** `transit enroll` is plain HTTPS and never opens the Herdr socket.
+- **The daemon.** It starts, logs `herdr unavailable (...); running adapter-only`, and keeps serving. A missing socket path is treated the same as a refused connection.
+- **The roster.** Native adapters are published on their own. A Herdr outage produces an empty pane list, and the daemon publishes the adapters beside it rather than abandoning the refresh — a roster that stops being sent would take the adapters off the Worker's map along with the panes.
+- **Identity.** An adapter names itself from `TRANSIT_AGENT_NAME`, from its persisted `(harness, session_id)` record, or from an auto-name the daemon mints. `claim_name` rebinds that native record and needs nothing from Herdr; when the caller also has a pane the rename is attempted and its failure is logged, never fatal.
+- **Sending, rooms, and every pull.** `send_message`, `read_inbox`, `read_room`, `list_agents`, `list_rooms` and the room verbs all travel over the daemon's Worker connection.
+
+What Herdr is still required for: **pushing into a live session that has no native adapter**. That is the one thing `agent.prompt` does and nothing else can. When it is unavailable, such a delivery naks with retryable `herdr_unavailable` — deliberately not `agent_not_found`, because one is a transport outage that clears by itself and the other is an operator error that does not. The message stays queued in the HostHub and the agent can fetch it with `read_inbox` in the meantime.
+
+## Pull, when nothing is live
+
+Push needs a live session. Pull does not, and every message Transit accepts is readable without one.
+
+A delivery with no sink — no adapter registered, no Herdr pane to type into, no daemon connected at all — is queued in the recipient's HostHub rather than refused. `read_inbox` returns those entries as the exact envelopes a daemon would have injected, so an agent reads the same bytes whether the message was pushed to it or pulled by it. **Reading does not settle**: the same entries come back until `mark_handled(delivery_id)` acknowledges each one, which is what makes it safe for a reader to die between fetching and acting.
+
+`read_room(room, limit?)` is the same idea for a room. It returns the members and the newest messages of a room the caller belongs to, so an agent that missed a fan-out can catch up. Membership is checked on every read.
+
+From a terminal, the operator's half of both is on the CLI:
+
+```bash
+transit inbox --waiting <agent>            # what the server still holds for it
+transit room <name> --agent <agent> [--limit n]
+```
+
+These read as an agent on this host, which the daemon's own host credential already authorizes. `transit inbox` on its own still shows this box's spool and its delivery history — different questions, and neither one shows a message that arrived while the agent had nothing live to take it.
+
 ## How an adapter reaches the daemon
 
 The daemon listens on `<data dir>/agent.sock` — by default `~/.local/share/transit/agent.sock` — with mode `0600`. Frames are newline-delimited JSON on a persistent, bidirectional connection, unlike the one-shot `transit.sock` used by the CLI and the MCP server. The socket is not reachable from the network, and it is authenticated by the kernel rather than by a token in a file: the daemon checks `SO_PEERCRED` for the same UID, records the peer PID's start time so PID reuse cannot impersonate a dead session, and hands back a random 32-hex capability that every later control frame must echo.

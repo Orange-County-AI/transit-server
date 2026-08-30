@@ -1399,6 +1399,36 @@ export class HostHub extends DurableObject<Env> {
     return caller.address;
   }
 
+  /**
+   * The bare name of an agent reading or settling its OWN queue.
+   *
+   * Deliberately weaker than {@link rpcCaller}: that one gates acting as an
+   * agent, and a roster entry is the proof a daemon can offer that the session
+   * is live. Reading a queue is the opposite situation. The queue exists
+   * precisely because nothing was live to take the message — an agent whose
+   * adapter is down, a box with no Herdr, a host that has not published a
+   * roster since it restarted. Requiring a roster entry here would withhold
+   * the messages exactly when they are the only way through, so the test is
+   * {@link canReceive}: is this a name this host may hold at all, by roster or
+   * by a declared `agent_client` row.
+   */
+  private async rpcInboxCaller(
+    identity: HostIdentity,
+    params: Record<string, unknown>,
+  ): Promise<string> {
+    if (typeof params.caller !== "string") throw new Error("caller is required");
+    const caller = parseAddress(params.caller);
+    if (
+      caller.kind !== "agent" ||
+      caller.organization !== undefined ||
+      caller.host !== identity.slug ||
+      !(await this.canReceive(caller.name, identity.org, identity.slug))
+    ) {
+      throw new Error("invalid rpc caller");
+    }
+    return caller.name;
+  }
+
   private async integrationForDelivery(
     org: string,
     deliveryId: string,
@@ -1526,18 +1556,31 @@ export class HostHub extends DurableObject<Env> {
           message: params.message,
           ...(replyMode ? { replyMode } : {}),
         });
+      } else if (method === "read_inbox") {
+        result = await this.readInbox(await this.rpcInboxCaller(identity, params));
       } else if (method === "mark_handled") {
         if (typeof params.delivery_id !== "string") {
           throw new Error("delivery_id is required");
         }
-        const caller = await this.rpcCaller(identity, params, options);
-        const integrationId = await this.integrationForDelivery(
-          identity.org,
-          params.delivery_id,
-        );
-        result = await this.env.INTEGRATION.getByName(
-          `org:${identity.org}:integration:${integrationId}`,
-        ).markHandled(params.delivery_id, caller);
+        // The prefix discriminates, as it does in `read_message`: a `tx_` id is
+        // an entry in this hub's own queue and settles here, a `dlv_` id
+        // belongs to a connector and settles in its Integration. One verb
+        // either way, so an agent never has to know which store held it.
+        if (params.delivery_id.startsWith("tx_")) {
+          result = await this.settleInbox(
+            await this.rpcInboxCaller(identity, params),
+            params.delivery_id,
+          );
+        } else {
+          const caller = await this.rpcCaller(identity, params, options);
+          const integrationId = await this.integrationForDelivery(
+            identity.org,
+            params.delivery_id,
+          );
+          result = await this.env.INTEGRATION.getByName(
+            `org:${identity.org}:integration:${integrationId}`,
+          ).markHandled(params.delivery_id, caller);
+        }
       } else if (method === "list_agents") {
         result = await listAgents(this.env.DB, {
           org: identity.org,
@@ -1551,6 +1594,41 @@ export class HostHub extends DurableObject<Env> {
           organization:
             typeof params.organization === "string" ? params.organization : null,
         });
+      } else if (method === "read_room") {
+        // A room's transcript was readable only through the dashboard, which
+        // means only a signed-in person could catch up on one. An agent that
+        // missed a fan-out — its adapter down, its box Herdr-less — had no way
+        // to see what it missed. Membership in the Room DO is the
+        // authorization; the caller check is the weaker inbox one for the same
+        // reason it is there, since a member with nothing live to receive on
+        // is exactly who needs to read back.
+        if (typeof params.room !== "string") throw new Error("room is required");
+        const name = await this.rpcInboxCaller(identity, params);
+        const parsedRoom = parseRoomTarget(params.room);
+        let roomOrg = identity.org;
+        let memberAddress = formatAgentAddress(name, identity.slug);
+        if (parsedRoom.organization) {
+          const connected = await resolveConnectedOrganization(
+            this.env.DB,
+            identity.org,
+            parsedRoom.organization,
+          );
+          if (!connected) throw new Error("organization is not connected");
+          roomOrg = connected.targetOrgId;
+          memberAddress = formatAgentAddress(
+            name,
+            identity.slug,
+            connected.sourceSlug,
+          );
+        }
+        const room = this.env.ROOM.getByName(
+          `org:${roomOrg}:room:${parsedRoom.room}`,
+        );
+        if (!(await room.hasMember(memberAddress))) {
+          throw new Error("not a member of this room");
+        }
+        const limit = typeof params.limit === "number" ? params.limit : 200;
+        result = await room.detail(limit);
       } else if (
         method === "create_room" ||
         method === "join_room" ||

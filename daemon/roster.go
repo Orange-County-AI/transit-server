@@ -55,6 +55,7 @@ func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
 	// still there and still deliverable, and a roster that never goes out would
 	// take them off the Worker's map along with the panes.
 	agents, err := d.herdr.ListAgents(ctx)
+	herdrAnswered := err == nil
 	if err != nil {
 		d.setHerdrAvailable(false, err)
 		agents = nil
@@ -98,19 +99,27 @@ func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
 		autoNames[renamed.PaneID] = renamed.Name
 		taken[renamed.Name] = true
 	}
-	for paneID, name := range autoNames {
-		found := false
-		for _, agent := range agents {
-			if agent.PaneID == paneID && agent.Name == name {
-				found = true
-				break
+	// Prune only against an answer. A Herdr outage produces an empty agent
+	// list, and pruning against that deletes the whole ledger — after which
+	// every pane that had an auto-name reads as `user`-named when Herdr comes
+	// back, and `registerAgentAdapter`'s "a placeholder yields to the pane"
+	// rule inverts. The ledger is provenance, not a cache: it must survive the
+	// outage that made it unverifiable.
+	if herdrAnswered {
+		for paneID, name := range autoNames {
+			found := false
+			for _, agent := range agents {
+				if agent.PaneID == paneID && agent.Name == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				delete(autoNames, paneID)
 			}
 		}
-		if !found {
-			delete(autoNames, paneID)
-		}
+		_ = d.saveAutoNames(autoNames)
 	}
-	_ = d.saveAutoNames(autoNames)
 
 	nativeByName := make(map[string]bool, len(nativeAdapters))
 	for _, adapter := range nativeAdapters {

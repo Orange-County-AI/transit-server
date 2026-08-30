@@ -384,6 +384,27 @@ func (d *Daemon) rpcResponse(ctx context.Context, request map[string]any) map[st
 		params = make(map[string]any)
 	}
 	callerName, callerEnrollment, hasCaller := d.callerAgent(request)
+	// `as_agent` is the OPERATOR's caller, set by the `transit` CLI and by
+	// nothing else. It exists because a person at a terminal is not a session:
+	// they have no adapter and no pane, so `callerAgent` cannot resolve them,
+	// and without this there is no way to read an agent's waiting queue from
+	// the box the agent runs on. The authority is already held — the daemon
+	// socket is 0600 and the device token behind it can inject to any agent on
+	// this host — so naming one adds nothing a local caller did not have.
+	//
+	// It is deliberately NOT reachable from a tool argument: `mcp.go` builds
+	// its own request maps and never copies a model's arguments into this key.
+	// Wiring one through would let an agent read another's inbox.
+	if !hasCaller {
+		if as := stringValue(request, "as_agent"); as != "" {
+			callerName, hasCaller = as, true
+			if runtime := d.defaultEnrollmentRuntime(); runtime != nil {
+				callerEnrollment = runtime.id
+			} else {
+				callerEnrollment = defaultEnrollment
+			}
+		}
+	}
 	if hasCaller {
 		params["caller"] = callerName + "@" + d.enrollmentHost(callerEnrollment)
 	} else if stringValue(request, "pane_id") != "" {
@@ -459,7 +480,15 @@ func (d *Daemon) whoamiResponse(request map[string]any) map[string]any {
 
 // claimCallerName rebinds the native adapter for a native caller. When that
 // caller also has a Herdr pane, it renames the pane too so both registries keep
-// the same address. Pane-only callers retain the Herdr rename path.
+// the same address. Pane-only callers use the Herdr rename path, which is the
+// only registry they have.
+//
+// For a native caller the pane rename is BEST-EFFORT. It used to be fatal, so
+// a Herdr that died between the last roster refresh and this call — the cached
+// pane is still there, the socket is not — failed a claim that needs nothing
+// from Herdr to succeed. The native registry is the one that answers
+// `whoami`, addresses deliveries and validates settlement; a stale pane label
+// beside it is cosmetic and the next refresh reconciles it.
 func (d *Daemon) claimCallerName(ctx context.Context, request map[string]any) (string, error) {
 	paneID := stringValue(request, "pane_id")
 	name := stringValue(request, "name")
@@ -475,13 +504,10 @@ func (d *Daemon) claimCallerName(ctx context.Context, request map[string]any) (s
 		}
 		if hasPane && paneAgent.PaneID != "" {
 			if _, err := d.claimName(ctx, paneID, name); err != nil {
-				return "", err
+				d.logf("claim_name: pane %s kept its old label (%v)", paneID, err)
 			}
 		}
 		return d.claimNativeAdapterName(adapter, name)
-	}
-	if hasPane && paneAgent.PaneID != "" {
-		return d.claimName(ctx, paneID, name)
 	}
 	return d.claimName(ctx, paneID, name)
 }

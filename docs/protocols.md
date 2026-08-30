@@ -121,15 +121,26 @@ tool cannot mean one thing locally and another over HTTP.
 They differ in where sender identity comes from, and only there.
 
 The daemon's stdio MCP server derives sender identity from the active local
-adapter. The Herdr path uses `HERDR_PANE_ID`; native adapters bind the
-MCP child to a registered Claude Code, OMP, Pi, or OpenCode session. A tool never
-accepts a model-supplied sender. Settlement ownership is validated on every operation.
+adapter. Native adapters bind the MCP child to a registered Claude Code, OMP,
+Pi, or OpenCode session; the Herdr path uses `HERDR_PANE_ID` and is the fallback
+for a harness that has no adapter. A tool never accepts a model-supplied sender.
+Settlement ownership is validated on every operation.
+
+Both servers dispatch through one function, `HostHub.invokeRpc`, so a tool means
+the same thing over a socket and over HTTP. That is a rule, not an observation:
+`read_inbox` was implemented on the HTTP endpoint alone for a release, and the
+consequence was that an agent whose adapter was down had messages queued for it
+in the Worker and no local tool that could ask for them. It read as a Herdr
+dependency and was a missing tool. `test/mcp-parity.test.ts` holds the two tool
+lists equal.
 
 | tool | args | behavior |
 |------|------|----------|
 | `send_message` | `to` (`name@host`, `organization-slug/name@host`, `#room`, or `organization-slug/#room`), `message`, `reply_to?` | durable local spool → `send` frame; cross-organization targets require an active connection; ack after Worker commit |
 | `chat_reply` | `delivery_id`, `conversation_id`, `message`, `reply_mode?` (`root\|thread`, Mattermost only) | rpc; settles channel delivery; duplicate returns prior result |
-| `mark_handled` | `delivery_id` | rpc; settles without reply; **ownership validated** |
+| `mark_handled` | `delivery_id` (`dlv_` or `tx_`) | rpc; settles without reply; **ownership validated**. A `dlv_` id settles a channel delivery in its Integration; a `tx_` id settles an inbox entry in the caller's HostHub queue |
+| `read_inbox` | — | rpc; every message queued for the caller, rendered as the envelopes a daemon would have injected. **Reading does not settle** — the same entries come back until `mark_handled` |
+| `read_room` | `room` (`NAME`, `#NAME`, or `organization-slug/#NAME`), `limit?` (default 200, capped at 500) | rpc; the room's members and its newest messages, oldest first. Refused unless the caller is a current member; settles nothing |
 | `list_agents` | `host?`, `organization?` | rpc; local roster by default; a connected organization slug returns qualified `address` values |
 | `list_rooms` | `organization?` | rpc; own-organization room roster by default; a connected organization slug returns qualified `address` values |
 | `create_room` | `name`, `policy?` (`open\|invite`, default `open`) | rpc; caller identity validated; creates the room and joins the caller; a room is always created in the caller's own organization, so a qualified name is refused |
@@ -154,16 +165,24 @@ connector treats as success.
 A **device token** proves a host, not an agent, so a caller that acts as one
 names it in an `X-Transit-Agent` header. That is not a widening of trust: the
 same token can publish any roster it likes over the daemon socket and send as
-anything in it. Tools that only read (`list_agents`, `list_rooms`,
-`read_message` for a `tx_` id) need no header; tools that act as an agent
-(`send_message`, `chat_reply`, `mark_handled`, the room tools, `whoami`) fail
-with an error naming the header when it is absent.
+anything in it. Tools that only read the directory (`list_agents`, `list_rooms`,
+`read_message` for a `tx_` id) need no header; tools that act as an agent, or
+that read one agent's own mail (`send_message`, `chat_reply`, `mark_handled`,
+`read_inbox`, `read_room`, the room tools, `whoami`), fail with an error naming
+the header when it is absent.
 
 Because the caller may have no daemon at all, the roster check that guards a
-daemon-asserted `from` is not applied to this path. The consequence is worth
-stating plainly: such an agent can **send** without a daemon, but nothing can be
-**delivered** to it, because delivery still requires a live roster entry. A
-message addressed to it fails `no_route` and surfaces as a dead letter.
+daemon-asserted `from` is not applied to this path. Such an agent can send, and
+it can also **receive**: a delivery it has no live sink for is queued in its
+HostHub and read back with `read_inbox`. Admission asks whether the address was
+*declared* — a roster entry, or a live `agent_client` row — not whether a
+session is up. A name with neither still fails `no_route` and surfaces as a dead
+letter.
+
+`read_inbox`, `read_room` and the `tx_` form of `mark_handled` deliberately use
+that weaker test rather than requiring a roster entry. Requiring one would
+withhold the queue at exactly the moment it is the only way through, since the
+queue exists because nothing was live to take the message.
 
 `claim_name` is refused here. It renames a live pane through the local adapter,
 and a credential has no pane; over HTTP an agent's name comes from its

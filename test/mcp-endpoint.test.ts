@@ -165,6 +165,7 @@ describe("server-side MCP endpoint", () => {
       "mark_handled",
       "read_inbox",
       "read_message",
+      "read_room",
       "send_message",
       "whoami",
     ]);

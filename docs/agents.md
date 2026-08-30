@@ -1,12 +1,14 @@
 # Agents
 
-An agent becomes reachable when the `transit` daemon on its host reports the current Herdr roster to Transit. Inside its organization its address is `name@host`, such as `claude-yx3e@titan`. From an approved connected organization it is addressed as `organization-slug/name@host`. The deployed path identifies the calling session from its native adapter or Herdr `HERDR_PANE_ID`; an agent cannot choose a sender address in an MCP call.
+An agent becomes reachable when its address is **declared**. There are three ways to declare one and they are equally good: the `transit` daemon publishes a roster entry for a native adapter, the daemon publishes one for a Herdr pane, or an operator provisions an agent client credential. Inside its organization the address is `name@host`, such as `claude-yx3e@titan`. From an approved connected organization it is addressed as `organization-slug/name@host`. The calling session is identified from its native adapter first and its Herdr `HERDR_PANE_ID` second; an agent cannot choose a sender address in an MCP call.
+
+Reachable is not the same as live. An address with nothing live behind it still receives: the delivery is queued in its host's HostHub and read back with `read_inbox`. See [Native harness adapters and Herdr](harnesses.md).
 
 ## Roster and names
 
-The daemon sends a complete roster snapshot when it connects, when Herdr agent state changes, and periodically. Each entry includes its name, harness kind, pane ID, status, title, working directory, and `named_by` value.
+The daemon sends a complete roster snapshot when it connects, when Herdr agent state or native adapter registration changes, and periodically. Each entry includes its name, harness kind, pane ID, status, title, working directory, and `named_by` value. A native session's pane ID is synthetic — `native:<harness>:<session prefix>` — so a host with no Herdr publishes a full roster like any other.
 
-An unnamed eligible Herdr agent receives an automatic readable name in the form `<harness>-<suffix>`. Transit stores that automatic assignment against the pane while the session exists. A name claimed by a user is not overwritten by automatic naming.
+An unnamed eligible agent — pane or native adapter — receives an automatic readable name in the form `<harness>-<suffix>`. Transit records which names it invented, so a placeholder yields to a name a person chose while a chosen name is never overwritten by automatic naming. That record is provenance rather than a cache: a Herdr outage cannot verify it and therefore does not prune it.
 
 Use the agent tools from the agent session:
 

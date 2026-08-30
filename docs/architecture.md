@@ -277,6 +277,82 @@ its `[[actions]]` provide the pause-toggle action.
 **Rationale:** the plugin ties daemon presence, roster changes, and operator
 access to herdr's existing lifecycle surface.
 
+### Herdr is optional
+
+**Decision — Herdr is one transport and one source of names, and no other part
+of Transit may depend on it.** A box whose harnesses all register native
+adapters has no use for it, and refusing to function there would leave those
+boxes with no Transit at all. Concretely: the daemon starts when the socket is
+missing (a bad path is treated exactly like a refused connection), a failed
+`agent.list` degrades the roster refresh to the native adapters instead of
+aborting it, registration skips its pane lookup rather than blocking on it, and
+identity resolves from a native adapter before it consults a pane.
+
+**Rationale for the failure codes.** A Herdr-path delivery with the socket down
+returns retryable `herdr_unavailable`, never `agent_not_found`. Falling through
+to an empty roster would report the latter, and the two clear differently: one
+is a transport outage that fixes itself, the other is operator error that does
+not. Sharing a code makes an outage look like a misconfiguration for as long as
+it lasts.
+
+**Rationale for the best-effort rename.** A native `claim_name` that also has a
+pane attempts the pane rename and logs its failure rather than propagating it.
+The native registry is what answers `whoami`, addresses deliveries and validates
+settlement; a stale pane label beside it is cosmetic, and the next refresh
+reconciles it. Making it fatal meant a Herdr that died between the last roster
+refresh and the call failed a claim that needs nothing from Herdr to succeed.
+
+**Rationale for not pruning the auto-name ledger during an outage.**
+`auto_names.json` records which names the daemon invented, and registration uses
+it to decide that a placeholder yields to the pane it sits beside. An outage
+produces an empty pane list; pruning against that erased the whole ledger, after
+which every invented name read as user-chosen when Herdr returned and the rule
+inverted. The ledger is provenance, not a cache, so it must survive the outage
+that made it unverifiable.
+
+### Pull is the half that never needs a session
+
+**Decision — every message Transit accepts is readable without a live session,
+through `read_inbox` and `read_room`.** Delivery is a push into a session and a
+push needs one; a delivery with no sink is queued in the recipient's HostHub
+rather than refused. `read_inbox` returns those entries as the exact envelopes a
+daemon would have injected, so an agent reads the same bytes either way.
+`read_room` answers the same question for a room's transcript, which was
+previously reachable only through `GET /api/rooms/:name` and therefore only to a
+signed-in person in a browser.
+
+**Reading does not settle.** A read that settles loses the message if the reader
+dies between fetching and acting, and every other delivery path in Transit is
+at-least-once with an explicit ack. `mark_handled` is that ack, and it takes
+both id shapes: a `dlv_` id settles a channel delivery in its Integration, a
+`tx_` id settles an inbox entry in this hub's queue. One verb, because the
+prefix already discriminates everywhere else that takes an id.
+
+**Decision — the caller check for these three is `canReceive`, not
+`hasAgent`.** Acting as an agent is gated on a roster entry, which is a daemon's
+proof that a session is live. Reading a queue is the opposite situation: the
+queue exists precisely because nothing was live, so requiring a roster entry
+would withhold the messages exactly when they are the only way through. The test
+is therefore whether the address was declared at all — a roster entry, or a live
+`agent_client` row.
+
+**Decision — both MCP servers dispatch through `HostHub.invokeRpc`.** They exist
+separately only because they pin the sender differently, and any tool
+implemented on one alone is a silent capability gap on the other.
+`read_inbox` was HTTP-only for a release, and the effect was that an agent whose
+adapter was down had messages queued for it and no local tool that could ask for
+them — which read as a Herdr dependency and was a missing tool.
+`test/mcp-parity.test.ts` holds the two lists equal.
+
+**Decision — the CLI reads as an agent through an explicit `as_agent` field.** A
+person at a terminal has no adapter and no pane, so caller resolution cannot
+find them, and without this there is no way to read an agent's queue from the
+box the agent runs on. The authority is already held: the daemon socket is 0600
+and the device token behind it can inject to any agent on the host, so naming
+one adds nothing a local caller did not have. The field is deliberately
+unreachable from a tool argument — `daemon/mcp.go` builds its own request maps
+and never copies a model's arguments into it.
+
 ### Native harness adapters
 
 **Decision — Claude Code, OMP, Pi, and OpenCode self-register with the host daemon over

@@ -71,10 +71,26 @@ function actor(principal: McpPrincipal): string {
   return address;
 }
 
-/** The acting agent's bare name; the queue is keyed by name, not address. */
-function agentName(principal: McpPrincipal): string {
-  actor(principal);
-  return principal.name!;
+/**
+ * An optional count. Every schema property here is `type: "string"`, so a model
+ * sends `"50"` about as often as `50`; anything that is not a number at all is
+ * dropped rather than passed on as `NaN`, which would reach a storage list as a
+ * limit and mean nothing.
+ */
+function count(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * A waiting queue, rendered. The envelopes go out verbatim — exactly the bytes
+ * a daemon would have injected into the session — so an agent reads the same
+ * thing whether the message was pushed to it or pulled by it.
+ */
+export function renderInbox(waiting: { envelope: string }[]): string {
+  if (waiting.length === 0) return "No messages waiting.";
+  return waiting.map((message) => message.envelope).join("\n\n");
 }
 
 function hub(env: Env, principal: McpPrincipal) {
@@ -170,30 +186,32 @@ async function runTool(
         }),
       );
     case "mark_handled": {
-      const deliveryId = required(args, "delivery_id");
-      // The prefix already discriminates everywhere else that takes an id -
-      // `read_message` branches on exactly this - so "I am done with it" stays
-      // one verb rather than growing a second tool for the inbox.
-      if (deliveryId.startsWith("tx_")) {
-        const settled = await hub(env, principal).settleInbox(
-          agentName(principal),
-          deliveryId,
-        );
-        return JSON.stringify(settled);
-      }
+      // The `tx_`/`dlv_` split lives in `invokeRpc` now, with the rest of the
+      // tool surface, so settling means the same thing over this endpoint and
+      // over the daemon wire.
       return JSON.stringify(
         await rpc(env, principal, "mark_handled", {
-          delivery_id: deliveryId,
+          delivery_id: required(args, "delivery_id"),
           caller: actor(principal),
         }),
       );
     }
     case "read_inbox": {
-      const waiting = await hub(env, principal).readInbox(agentName(principal));
-      if (waiting.length === 0) return "No messages waiting.";
-      // The envelopes verbatim, exactly the bytes a daemon would have injected
-      // into the session, so an agent reads the same thing either way.
-      return waiting.map((message) => message.envelope).join("\n\n");
+      const waiting = (await rpc(env, principal, "read_inbox", {
+        caller: actor(principal),
+      })) as { envelope: string }[];
+      return renderInbox(waiting);
+    }
+    case "read_room": {
+      return JSON.stringify(
+        await rpc(env, principal, "read_room", {
+          room: required(args, "room"),
+          caller: actor(principal),
+          ...(count(args.limit) === undefined ? {} : { limit: count(args.limit) }),
+        }),
+        null,
+        2,
+      );
     }
     // These two only observe, so they read the directory service directly
     // rather than through a HostHub. That is not an optimisation: a signed-in

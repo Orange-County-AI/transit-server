@@ -40,8 +40,12 @@ Transit messages arrive in a `transit/1` envelope. The skill instructs an agent 
 - Use the envelope's direct-message reply hint and `reply_to` when replying to a direct or room message.
 - Treat `organization-slug/name@host` as an explicit connected-organization address, use `list_agents(organization="<slug>")` for discovery, and preserve the qualified target in replies.
 - Never accept or provide a model-supplied `from`; sender identity is derived from the local delivery adapter, which is a native Claude Code, OMP, Pi, or OpenCode adapter when registered and Herdr otherwise.
+- Call `read_inbox()` to fetch messages that were never pushed into the session, and `mark_handled(id)` to settle each one — reading does not settle, so an unsettled id comes back.
+- Call `read_room(room, limit?)` to catch up on a room whose fan-out the session missed.
 
 `read_message` is required before settling a channel delivery because its initial envelope contains a bounded preview, not the complete external message. If a redelivery arrives for an already read but unsettled delivery, the agent settles it without sending another reply.
+
+The pull tools exist because delivery is a push and a push needs a live session. An agent whose adapter was down, or whose host has no Herdr, still has its messages: they are queued rather than refused. Reading them is the agent's own job, so the skill tells it to poll after a restart rather than assume silence means nothing arrived.
 
 ## Exact protocol
 

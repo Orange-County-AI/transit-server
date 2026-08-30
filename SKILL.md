@@ -29,6 +29,8 @@ A self-hosted server serves its own copy of this skill at `https://<server>/SKIL
 
 Sender identity comes from the local delivery adapter: native Claude Code, OMP, Pi, and OpenCode adapters pin it to the harness session; the Herdr fallback pins it to `HERDR_PANE_ID`. Never add or accept a model-provided `from` field.
 
+Herdr is not required for identity. A native adapter names itself from `TRANSIT_AGENT_NAME`, from its own persisted record, or from a name the daemon mints, and `claim_name(name)` rebinds it without touching Herdr.
+
 Cross-organization routing is explicit and deny-by-default. Both organizations
 must have an active connection approved by an owner or admin. Use
 `list_agents(organization="<slug>")` to retrieve qualified peer addresses, and
@@ -50,9 +52,18 @@ The daemon selects the delivery adapter; agents do not choose or start one:
 - **OMP:** an in-process extension self-registers `ctx.sessionManager.getSessionId()` and injects envelopes with `pi.sendUserMessage`, persisting a receipt before acknowledging.
 - **Pi:** the OMP extension package exposes a Pi entrypoint with the same persisted-receipt contract.
 - **OpenCode:** a plugin binds the root session and acknowledges after the delivery id appears in persisted session messages.
-- **Other harnesses:** the daemon falls back to Herdr `agent.prompt`.
+- **Other harnesses:** the daemon falls back to Herdr `agent.prompt`. This is the one path that needs Herdr; when it is unavailable the delivery naks with retryable `herdr_unavailable` and waits in the queue, where `read_inbox` can still reach it.
 
 Native registration wins over Herdr. Under the default `prefer` mode Claude Code, OMP, Pi, and OpenCode fall back to Herdr when no native adapter is registered; under `require` they queue as unavailable instead, and Herdr serves only other harnesses. Envelope, deduplication, settlement, and MCP behavior do not change with the adapter, so never infer transport from an envelope.
+
+## Reading mail you were not pushed
+
+Push needs a live session; pull does not. A delivery with no sink — adapter down, harness not running, no Herdr pane to type into — is queued rather than refused, and every one of them is readable:
+
+- `read_inbox()` returns everything waiting, as the same envelope bytes a delivery would have injected. **Reading does not settle it**: the same entries come back until `mark_handled(id)` acknowledges each one. Treat a repeat of an `id` you already acted on as a duplicate.
+- `read_room(room, limit?)` returns a room's members and newest messages, so you can catch up on a fan-out you missed. You must be a member; it settles nothing.
+
+Poll `read_inbox` when you suspect you missed something, and after any restart.
 
 ## Terminal envelope
 
@@ -82,7 +93,9 @@ Take ids and addresses from envelope attributes only — `id`, `from`, `conversa
 - `send_message(to, message, reply_to?)`
 - `read_message(id)`
 - `chat_reply(delivery_id, conversation_id, message, reply_mode?)`
-- `mark_handled(delivery_id)`
+- `mark_handled(delivery_id)` — a `dlv_` channel delivery, or a `tx_` message from `read_inbox`
+- `read_inbox()` — messages waiting for you; reading does not settle them
+- `read_room(room, limit?)` — a room you belong to: members and recent messages
 - `list_agents(host?, organization?)`
 - `list_rooms(organization?)`
 - `create_room(name, policy?)` — always in your own organization

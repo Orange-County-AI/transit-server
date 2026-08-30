@@ -35,9 +35,11 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: transit <daemon|adapter|enroll|config|status|inbox|pause|mcp|version>")
+		return fmt.Errorf("usage: transit <daemon|adapter|enroll|config|status|inbox|room|pause|mcp|version>")
 	}
 	switch args[0] {
+	case "room":
+		return runRoom(args[1:])
 	case "daemon":
 		return runDaemon(args[1:])
 	case "adapter":
@@ -295,13 +297,84 @@ func startDetachedDaemon() error {
 	return command.Process.Release()
 }
 
+// runRoom prints a room's members and recent messages. It is the operator's
+// half of `read_room`: the transcript used to be reachable only through the
+// dashboard, so a box with no browser in front of it — and no Herdr to inject
+// into a pane — had no way to see what a room had said.
+func runRoom(args []string) error {
+	flags := flag.NewFlagSet("room", flag.ContinueOnError)
+	agent := flags.String("agent", "", "agent on this host to read as (must be a member)")
+	limit := flags.Int("limit", 50, "how many messages to print")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return fmt.Errorf("usage: transit room <name> --agent <agent> [--limit n]")
+	}
+	if *agent == "" {
+		return fmt.Errorf("--agent is required: a room is read as one of its members")
+	}
+	response, err := daemonCall(map[string]any{
+		"op": "rpc", "method": "read_room", "as_agent": *agent,
+		"params": map[string]any{"room": flags.Arg(0), "limit": *limit},
+	})
+	if err != nil {
+		return err
+	}
+	if err := responseError(response); err != nil {
+		return err
+	}
+	var detail struct {
+		Name     string `json:"name"`
+		Policy   string `json:"policy"`
+		Sequence int    `json:"sequence"`
+		Members  []struct {
+			Address string `json:"address"`
+		} `json:"members"`
+		Messages []struct {
+			Seq       int    `json:"seq"`
+			From      string `json:"from"`
+			Body      string `json:"body"`
+			CreatedAt int64  `json:"createdAt"`
+		} `json:"messages"`
+	}
+	raw, _ := json.Marshal(response["result"])
+	if err := json.Unmarshal(raw, &detail); err != nil {
+		return err
+	}
+	fmt.Printf("#%s  (%s, seq %d)\n\nMEMBERS\n", detail.Name, detail.Policy, detail.Sequence)
+	for _, member := range detail.Members {
+		fmt.Printf("  %s\n", member.Address)
+	}
+	fmt.Print("\nMESSAGES\n")
+	for _, message := range detail.Messages {
+		fmt.Printf("  %4d  %s  %s\n        %s\n", message.Seq,
+			time.UnixMilli(message.CreatedAt).UTC().Format(time.RFC3339),
+			message.From, previewLine(message.Body))
+	}
+	if len(detail.Messages) == 0 {
+		fmt.Println("  (none)")
+	}
+	return nil
+}
+
 func runInbox(args []string) error {
 	flags := flag.NewFlagSet("inbox", flag.ContinueOnError)
 	watch := flags.Bool("watch", false, "refresh until interrupted")
 	delivered := flags.Bool("delivered", false, "list recent deliveries and the transport each took")
+	waiting := flags.String("waiting", "", "print the messages the server still holds for this agent")
 	limit := flags.Int("limit", 20, "how many deliveries to list")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	// `--waiting` asks the SERVER what it is still holding, which is a
+	// different question from everything else this command prints. The spool is
+	// what this box has not sent; the delivery history is what it has already
+	// injected. Neither shows a message that arrived while the agent had no
+	// adapter and no pane to take it — that message is queued in the Worker,
+	// and until now nothing on the box could see it.
+	if *waiting != "" {
+		return printWaiting(*waiting)
 	}
 	for {
 		response, err := daemonCall(map[string]any{"op": "inbox"})
@@ -370,6 +443,33 @@ func runInbox(args []string) error {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// printWaiting renders the queue verbatim — the same envelopes `read_inbox`
+// hands an agent — because the operator reading this is usually deciding
+// whether the agent would have understood the message, not skimming a list.
+func printWaiting(agent string) error {
+	response, err := daemonCall(map[string]any{
+		"op": "rpc", "method": "read_inbox", "as_agent": agent,
+		"params": map[string]any{},
+	})
+	if err != nil {
+		return err
+	}
+	if err := responseError(response); err != nil {
+		return err
+	}
+	entries, _ := response["result"].([]any)
+	fmt.Printf("WAITING FOR %s  %d\n", agent, len(entries))
+	for _, entry := range entries {
+		fields, _ := entry.(map[string]any)
+		envelope, _ := fields["envelope"].(string)
+		fmt.Printf("\n%s\n", envelope)
+	}
+	if len(entries) == 0 {
+		fmt.Println("\n(none — nothing is queued for this agent)")
+	}
+	return nil
 }
 
 // deliveredRows decodes the delivery history an IPC response carries, matching

@@ -75,9 +75,23 @@ The sender must already be a member. Transit stores the post once, excludes the 
 
 Dashboard posts are deliberately marked as `operator@transit`. They are visually distinct in the transcript and can be answered by posting back to `#room`.
 
+### Reading a room back
+
+A member reads the transcript with `read_room`:
+
+```text
+read_room(room="ops")
+read_room(room="ops", limit=50)
+read_room(room="partner-org/#ops")
+```
+
+It returns the room's members and its newest messages in `seq` order, defaulting to 200 and capped at 500. Use it to catch up on a fan-out that arrived while the agent had nothing live to receive on — the transcript was previously reachable only through the dashboard, so an agent that missed a post could not see what it missed.
+
+Membership is checked on every read, so leaving a room closes its transcript again. Reading settles nothing and changes nothing. An operator reads the same thing from a terminal with `transit room <name> --agent <agent>`.
+
 ## Offline members and deletion
 
-Membership does not require a member to be online. A post for an offline member remains queued in that member's HostHub until the host reconnects and the agent is present again. The ordinary HostHub cap still applies: delivery becomes dead after 40 attempts or 24 hours. The member rail makes the resulting lag visible.
+Membership does not require a member to be online. A post for an offline member remains queued in that member's HostHub until the host reconnects and the agent is present again, and the member can fetch it at any point with `read_inbox` or read the whole room with `read_room` — neither needs a live session. The ordinary HostHub cap still applies: an undelivered entry becomes dead after 40 attempts or 24 hours. The member rail makes the resulting lag visible.
 
 To delete a room, use **Delete room** from its card menu and confirm it. Deletion removes the live room transcript and membership state, closes room viewers, and prevents new room operations. Archived message retention remains governed separately.
 

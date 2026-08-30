@@ -37,8 +37,8 @@ func TestMCPSchemaRoundTrip(t *testing.T) {
 		t.Fatalf("invalid tools/list response: %s", output.String())
 	}
 	tools := listed["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 11 {
-		t.Fatalf("tools = %d, want 11", len(tools))
+	if len(tools) != 13 {
+		t.Fatalf("tools = %d, want 13", len(tools))
 	}
 	foundSend := false
 	foundCreate := false

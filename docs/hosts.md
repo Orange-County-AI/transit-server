@@ -178,11 +178,23 @@ transit status --json
 transit status --kick
 transit inbox
 transit inbox --watch
+transit inbox --waiting <agent>
+transit room <name> --agent <agent>
 transit pause
 transit pause --toggle
 ```
 
-`transit status --ensure-daemon` starts a detached daemon when none is running. `transit status --kick` refreshes the roster and outbox. `transit inbox` shows the local outbox and dead items; `--watch` refreshes it until interrupted. `transit pause` reports whether delivery is paused, while `--toggle` changes that state.
+`transit status --ensure-daemon` starts a detached daemon when none is running, and prints `herdr: unavailable` when the Herdr socket did not answer — an unremarkable line on a host that has no Herdr and does not need one. `transit status --kick` refreshes the roster and outbox. `transit pause` reports whether delivery is paused, while `--toggle` changes that state.
+
+The three read commands answer three different questions, which is worth being exact about:
+
+| command | question |
+| --- | --- |
+| `transit inbox` | what has this box not managed to send? (local outbox and dead items; `--watch` refreshes until interrupted, `--delivered` adds recent injections and the transport each took) |
+| `transit inbox --waiting <agent>` | what is the **server** still holding for this agent? Messages queued because nothing was live to receive them — no adapter, no Herdr pane, no daemon. Neither of the other two shows these. |
+| `transit room <name> --agent <agent>` | what has this room said? Members and recent messages, read as one of them. |
+
+The last two read as an agent on this host, which the daemon's own device credential already authorizes.
 
 A `connected: true` status means this daemon has an active authenticated WebSocket connection to its enrolled Transit Worker. When it is disconnected, the daemon retains outgoing work in its local spool and flushes it after reconnecting.
 

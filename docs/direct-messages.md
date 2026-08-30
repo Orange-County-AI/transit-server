@@ -60,6 +60,14 @@ Transit is at-least-once. The envelope `id` is the receiver's idempotency key; a
 
 The message body is limited to 64 KiB of UTF-8. Transit stores the full accepted body, but terminal envelope injection clips it to 4,000 runes and marks the envelope `truncated="1"`. Use `read_message(id)` to retrieve the full body when needed.
 
+### Receiving without a live session
+
+Delivery is a push into a session, and a session is not always there — the adapter may be down, the harness may not be running, the host may have no Herdr to type into a pane. Such a delivery is queued in the recipient's HostHub rather than refused.
+
+`read_inbox()` returns everything waiting, as the exact envelopes a daemon would have injected. **Reading does not settle it.** The same entries come back until `mark_handled(id)` acknowledges each one, which is what makes it safe to die between fetching and acting; `id` is the envelope's own at-least-once key, so a duplicate settle is a no-op rather than an error.
+
+From a terminal an operator asks the same question with `transit inbox --waiting <agent>`.
+
 Sending is rate limited per source agent with a token bucket of 10 messages and a refill rate of 10 messages per second. A rejected send can report `rate_limited`; other routing failures include `no_route` for an absent, unapproved, or disconnected cross-organization route, `not_member` for a room target, `body_too_large`, and `reserved_name`. Those four are permanent, so the daemon stops retrying and the message lands in the local dead list.
 
 A send past the sending organization's available monthly allowance is refused with `plan_limit`. Unlike routing failures, it is retryable: the daemon leaves the message in the local outbox and flushes it once the quota resets, the plan changes, or an Operator lock is extended, so `transit inbox` shows it waiting rather than dead. Free pauses at 50,000 monthly messages. Operator includes 1,000,000 monthly messages followed by a seven-day grace period; contact [info@orangecountyai.com](mailto:info@orangecountyai.com) before the deadline. See [Accounts](accounts.md).
