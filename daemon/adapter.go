@@ -835,6 +835,27 @@ func (d *Daemon) nativeAdapterByName(enrollment, name string) *agentAdapter {
 	return adapter
 }
 
+// uniqueNativeAdapterByPane resolves a pane only when exactly one live adapter
+// declares it. IPC helpers are not always descendants of the harness process,
+// so pid ancestry can miss even though the request carries the real pane id.
+func (d *Daemon) uniqueNativeAdapterByPane(paneID string) (adapter *agentAdapter, ambiguous bool) {
+	if paneID == "" {
+		return nil, false
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, candidate := range d.adapters {
+		if candidate.paneID != paneID {
+			continue
+		}
+		if adapter != nil && adapter != candidate {
+			return nil, true
+		}
+		adapter = candidate
+	}
+	return adapter, false
+}
+
 func (d *Daemon) nativeNamesPath() string { return filepath.Join(d.store.root, "native_names.json") }
 
 func (d *Daemon) loadNativeNames() map[string]nativeName {

@@ -488,6 +488,13 @@ func (d *Daemon) claimCallerName(ctx context.Context, request map[string]any) (s
 	if pid := intValue(request, "pid"); pid > 0 {
 		adapter = d.nativeAdapterForProcess(pid)
 	}
+	if adapter == nil && hasPane {
+		var ambiguous bool
+		adapter, ambiguous = d.uniqueNativeAdapterByPane(paneAgent.PaneID)
+		if ambiguous {
+			return "", fmt.Errorf("multiple native adapters occupy pane %s", paneAgent.PaneID)
+		}
+	}
 	if adapter != nil {
 		if err := d.validateNativeNameClaim(adapter, name); err != nil {
 			return "", err
