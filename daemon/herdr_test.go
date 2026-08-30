@@ -103,6 +103,59 @@ func TestHerdrListAndPromptWait(t *testing.T) {
 	}
 }
 
+// agent.prompt can legitimately wait for a whole agent turn. Every Herdr RPC
+// uses its own Unix connection, so that wait must not serialize roster and
+// health calls behind it.
+func TestHerdrLongPromptDoesNotBlockRosterCalls(t *testing.T) {
+	promptStarted := make(chan struct{})
+	releasePrompt := make(chan struct{})
+	path := fakeHerdr(t, func(request herdrRequest) (any, *HerdrAPIError) {
+		switch request.Method {
+		case "ping":
+			return pong(), nil
+		case "agent.prompt":
+			close(promptStarted)
+			<-releasePrompt
+			return map[string]any{
+				"type": "agent_prompted",
+				"agent": map[string]any{
+					"name": "alice", "agent": "omp", "agent_status": "idle", "pane_id": "w1:p1",
+				},
+			}, nil
+		case "agent.list":
+			return map[string]any{
+				"type": "agent_list",
+				"agents": []map[string]any{{
+					"name": "alice", "agent": "omp", "agent_status": "idle", "pane_id": "w1:p1",
+				}},
+			}, nil
+		default:
+			return nil, &HerdrAPIError{Code: "unknown_method", Message: request.Method}
+		}
+	})
+	driver := newHerdrSocket(path, func(string) {})
+	promptDone := make(chan PromptResult, 1)
+	go func() {
+		promptDone <- driver.PromptAgent(context.Background(), "alice", "hello", time.Second)
+	}()
+	<-promptStarted
+	timer := time.AfterFunc(300*time.Millisecond, func() { close(releasePrompt) })
+	defer timer.Stop()
+
+	started := time.Now()
+	agents, err := driver.ListAgents(context.Background())
+	elapsed := time.Since(started)
+	if err != nil || len(agents) != 1 || agents[0].Name != "alice" {
+		t.Fatalf("ListAgents() = %#v, %v", agents, err)
+	}
+	if elapsed >= 150*time.Millisecond {
+		t.Fatalf("ListAgents blocked %s behind agent.prompt; independent connections must run concurrently", elapsed)
+	}
+	if result := <-promptDone; !result.OK {
+		t.Fatalf("PromptAgent() = %+v", result)
+	}
+}
+
 func TestHerdrProtocolOverride(t *testing.T) {
 	t.Setenv("TRANSIT_HERDR_PROTOCOL_ALLOW", "19")
 	path := fakeHerdr(t, func(request herdrRequest) (any, *HerdrAPIError) {

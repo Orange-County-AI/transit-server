@@ -122,9 +122,7 @@ func newHerdrSocket(path string, logf func(string)) *herdrSocket {
 func (d *herdrSocket) Ping(ctx context.Context) (string, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, herdrSocketIOTimeout)
 	defer cancel()
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.pingLocked(ctx)
+	return d.ping(ctx)
 }
 
 func (d *herdrSocket) ListAgents(ctx context.Context) ([]HerdrAgent, error) {
@@ -317,12 +315,10 @@ func (d *herdrSocket) Notify(ctx context.Context, title, body string) error {
 func (d *herdrSocket) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, herdrSocketIOTimeout)
 	defer cancel()
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if _, _, err := d.pingLocked(ctx); err != nil {
+	if _, _, err := d.ping(ctx); err != nil {
 		return nil, err
 	}
-	response, err := d.exchangeLocked(ctx, method, params)
+	response, err := d.exchange(ctx, method, params)
 	if err != nil {
 		return nil, err
 	}
@@ -332,8 +328,8 @@ func (d *herdrSocket) call(ctx context.Context, method string, params any) (json
 	return response.Result, nil
 }
 
-func (d *herdrSocket) pingLocked(ctx context.Context) (string, int, error) {
-	response, err := d.exchangeLocked(ctx, "ping", struct{}{})
+func (d *herdrSocket) ping(ctx context.Context) (string, int, error) {
+	response, err := d.exchange(ctx, "ping", struct{}{})
 	if err != nil {
 		return "", 0, err
 	}
@@ -354,14 +350,17 @@ func (d *herdrSocket) pingLocked(ctx context.Context) (string, int, error) {
 	if _, accepted := d.acceptedProtocols[pong.Protocol]; !accepted {
 		return "", 0, fmt.Errorf("herdr protocol %d not accepted (accepted: %s)", pong.Protocol, d.acceptedProtocolString())
 	}
-	if !d.loggedProtocol {
+	d.mu.Lock()
+	logProtocol := !d.loggedProtocol
+	d.loggedProtocol = true
+	d.mu.Unlock()
+	if logProtocol {
 		d.logf(fmt.Sprintf("herdr protocol %d accepted", pong.Protocol))
-		d.loggedProtocol = true
 	}
 	return pong.Version, pong.Protocol, nil
 }
 
-func (d *herdrSocket) exchangeLocked(ctx context.Context, method string, params any) (herdrResponse, error) {
+func (d *herdrSocket) exchange(ctx context.Context, method string, params any) (herdrResponse, error) {
 	var dialer net.Dialer
 	connection, err := dialer.DialContext(ctx, "unix", d.path)
 	if err != nil {
@@ -375,8 +374,10 @@ func (d *herdrSocket) exchangeLocked(ctx context.Context, method string, params 
 	if err := connection.SetDeadline(deadline); err != nil {
 		return herdrResponse{}, err
 	}
+	d.mu.Lock()
 	d.nextID++
 	id := fmt.Sprintf("req_%d", d.nextID)
+	d.mu.Unlock()
 	if err := json.NewEncoder(connection).Encode(herdrRequest{ID: id, Method: method, Params: params}); err != nil {
 		return herdrResponse{}, err
 	}

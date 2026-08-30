@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -116,6 +117,61 @@ func TestDeliverSequentialAttemptsStillPrompt(t *testing.T) {
 	defer mu.Unlock()
 	if prompts != 2 {
 		t.Fatalf("agent.prompt called %d times across two sequential attempts, want 2", prompts)
+	}
+}
+
+// A Herdr prompt can land and then lose its response when the socket stalls.
+// The roster snapshot already carries the local transcript path, so settlement
+// must read that artefact before asking the same failed socket for agent.get.
+func TestDeliverSettlesFromCachedTranscriptWhenHerdrResponseIsLost(t *testing.T) {
+	const id = "tx_transcript01"
+	transcript := t.TempDir() + "/session.jsonl"
+	if err := os.WriteFile(transcript, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent := HerdrAgent{Name: "alice", Kind: "claude", PaneID: "titan:p1", Status: "idle"}
+	agent.Session.Kind = "path"
+	agent.Session.Value = transcript
+	getCalls := 0
+	path := fakeHerdr(t, func(request herdrRequest) (any, *HerdrAPIError) {
+		switch request.Method {
+		case "ping":
+			return pong(), nil
+		case "pane.read":
+			return map[string]any{"type": "pane_read", "read": map[string]any{"text": ""}}, nil
+		case "agent.prompt":
+			if err := os.WriteFile(transcript, []byte(`{"message":"`+id+`"}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return nil, &HerdrAPIError{Code: "timeout", Message: "response lost after delivery"}
+		case "agent.get":
+			getCalls++
+			return nil, &HerdrAPIError{Code: "timeout", Message: "socket still unavailable"}
+		default:
+			return nil, &HerdrAPIError{Code: "unexpected", Message: request.Method}
+		}
+	})
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newDaemon(
+		&Config{URL: "https://transit.example", Host: "titan", DeliveryMode: "prefer"},
+		"token", store, newHerdrSocket(path, nil),
+	)
+	d.herdrAgents = []HerdrAgent{agent}
+
+	code, retryable, err := d.deliverOnce(context.Background(), d.defaultEnrollmentRuntime(), WireFrame{
+		ID: id, Agent: agent.Name, Envelope: `<transit id="` + id + `"/>`,
+	})
+	if code != "" || retryable || err != nil {
+		t.Fatalf("deliverOnce = %q, %t, %v; cached transcript proves delivery", code, retryable, err)
+	}
+	if getCalls != 0 {
+		t.Fatalf("agent.get called %d times despite a conclusive cached transcript", getCalls)
+	}
+	if !d.store.IncomingRecorded(id) {
+		t.Fatal("landed delivery was not archived")
 	}
 }
 

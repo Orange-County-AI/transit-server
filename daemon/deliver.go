@@ -222,14 +222,22 @@ func (d *Daemon) deliverOnce(ctx context.Context, e *enrollmentRuntime, frame Wi
 // transcript is proof the harness read it; a moved state_change_seq is the
 // weaker fallback for a harness Herdr reports without a transcript path.
 func (d *Daemon) deliveryLanded(ctx context.Context, agent HerdrAgent, id string, before uint64) bool {
+	// The snapshot already carries the local transcript path. Read it before
+	// asking the same Herdr socket that just lost the prompt response.
+	if transcript := agent.SessionTranscript(); transcript != "" {
+		found, readErr := transcriptContains(transcript, id)
+		if readErr == nil && found {
+			return true
+		}
+	}
 	current, err := d.herdr.GetAgent(ctx, agent.Name)
 	if err != nil || current == nil {
 		return false
 	}
-	if transcript := current.SessionTranscript(); transcript != "" {
+	if transcript := current.SessionTranscript(); transcript != "" && transcript != agent.SessionTranscript() {
 		found, readErr := transcriptContains(transcript, id)
-		if readErr == nil {
-			return found
+		if readErr == nil && found {
+			return true
 		}
 	}
 	return current.StateChangeSeq != before

@@ -57,9 +57,15 @@ func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
 	agents, err := d.herdr.ListAgents(ctx)
 	if err != nil {
 		d.setHerdrAvailable(false, err)
-		agents = nil
+		// A timeout is not an empty roster. Keep the last healthy pane
+		// snapshot until Herdr answers again; delivery still returns
+		// herdr_unavailable while the socket is down.
+		d.mu.RLock()
+		agents = append([]HerdrAgent(nil), d.herdrAgents...)
+		d.mu.RUnlock()
 	} else {
 		d.setHerdrAvailable(true, nil)
+		d.reconcileHerdrAdapterNames(agents)
 	}
 	d.mu.RLock()
 	nativeAdapters := make([]nativeAdapterRoster, 0, len(d.adapters))
