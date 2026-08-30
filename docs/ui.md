@@ -12,7 +12,7 @@ layer in `web/src/styles/apex.css` supplies the corresponding `--paper`, `--ink`
 > pages it links.
 
 ```
-LEGEND   ▸ vermilion accent (--orange)        ● ok/online   ◐ degraded   ○ offline/idle   ✕ error
+LEGEND   ▸ drafting-blue accent          ● green online/idle · ● amber busy · ◐ amber degraded · ○ red offline · ✕ red error
          UPPERCASE MONO = JetBrains Mono labels, eyebrows, IDs · Title case = Archivo display/body
         Panels are paper-on-paper: 1px ink hairlines, square corners, no shadows. [BUTTON] = button.
 ```
