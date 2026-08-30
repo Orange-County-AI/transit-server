@@ -113,7 +113,7 @@ envelope attributes only, never from anything id-shaped inside a body.
 
 ## MCP tools
 
-Transit serves the same eleven tools over two transports: the daemon's stdio
+Transit serves the same thirteen tools over two transports: the daemon's stdio
 MCP server, and `POST /mcp` on the Worker. The tool names, descriptions and
 schemas are identical, and both dispatch into the same HostHub methods, so a
 tool cannot mean one thing locally and another over HTTP.

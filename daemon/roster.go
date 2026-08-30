@@ -105,12 +105,14 @@ func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
 		autoNames[renamed.PaneID] = renamed.Name
 		taken[renamed.Name] = true
 	}
-	// Prune only against an answer. A Herdr outage produces an empty agent
-	// list, and pruning against that deletes the whole ledger — after which
-	// every pane that had an auto-name reads as `user`-named when Herdr comes
-	// back, and `registerAgentAdapter`'s "a placeholder yields to the pane"
-	// rule inverts. The ledger is provenance, not a cache: it must survive the
-	// outage that made it unverifiable.
+	// Prune only against an answer. During an outage `agents` is the last
+	// healthy snapshot rather than live truth, and it was an empty list before
+	// that snapshot was kept — either way it is not evidence that a pane went
+	// away. Pruning against it drops entries the daemon cannot currently check,
+	// after which every pane that had an auto-name reads as `user`-named and
+	// `registerAgentAdapter`'s "a placeholder yields to the pane" rule inverts.
+	// The ledger is provenance, not a cache: it must survive the outage that
+	// made it unverifiable.
 	if herdrAnswered {
 		for paneID, name := range autoNames {
 			found := false
