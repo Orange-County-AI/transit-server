@@ -409,6 +409,29 @@ func TestClaimCallerNameRenamesPaneWithoutNativeAdapter(t *testing.T) {
 	}
 }
 
+func TestClaimCallerNameRebindsUniqueAdapterByPaneWithoutProcessMatch(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{{Name: "omp-old", Kind: "omp", PaneID: "pane-1"}}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	setAdapterTestHerdrAgents(d, agents)
+	adapter := registerAdapterDirect(t, d, agentFrame{
+		Harness: "omp", SessionID: "session-1", PaneID: "pane-1", Name: "omp-old",
+	})
+
+	address, err := d.claimCallerName(context.Background(), map[string]any{
+		"pane_id": "pane-1", "name": "omp-new",
+	})
+	if err != nil || address != "omp-new@titan" {
+		t.Fatalf("claimCallerName = %q, %v", address, err)
+	}
+	if agents[0].Name != "omp-new" || adapter.name != "omp-new" {
+		t.Fatalf("pane/native names = %q/%q, want %q", agents[0].Name, adapter.name, "omp-new")
+	}
+	if adapter.namedBy != "user" {
+		t.Fatalf("adapter named_by = %q, want user", adapter.namedBy)
+	}
+}
+
 func TestClaimCallerNameRenamesNativeAdapterAndPane(t *testing.T) {
 	var prompts int
 	agents := []HerdrAgent{{Name: "omp-old", Kind: "omp", PaneID: "pane-1"}}

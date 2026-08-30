@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -64,6 +65,77 @@ func TestRefreshRosterPublishesAdaptersWithoutHerdr(t *testing.T) {
 	d.mu.RUnlock()
 	if len(roster) != 1 || roster[0].Name != "solo" {
 		t.Fatalf("roster = %#v; want the native adapter alone", roster)
+	}
+}
+
+// A transient Herdr timeout is not an empty roster. Publishing adapters alone
+// during that timeout tells the Worker every pane departed, strands their mail,
+// and turns a healthy remote host into list_agents=[] until the next refresh.
+func TestRefreshRosterRetainsLastHealthyHerdrAgentsDuringOutage(t *testing.T) {
+	agent := HerdrAgent{Name: "alice", Kind: "claude", PaneID: "pane-1", Status: "idle"}
+	var mu sync.Mutex
+	available, present := true, true
+	path := fakeHerdr(t, func(request herdrRequest) (any, *HerdrAPIError) {
+		switch request.Method {
+		case "ping":
+			return pong(), nil
+		case "agent.list":
+			mu.Lock()
+			defer mu.Unlock()
+			if !available {
+				return nil, &HerdrAPIError{Code: "timeout", Message: "temporary timeout"}
+			}
+			agents := []HerdrAgent{}
+			if present {
+				agents = append(agents, agent)
+			}
+			return map[string]any{"type": "agent_list", "agents": agents}, nil
+		default:
+			return nil, &HerdrAPIError{Code: "unexpected", Message: request.Method}
+		}
+	})
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newDaemon(
+		&Config{URL: "https://transit.example", Host: "titan", DeliveryMode: "prefer"},
+		"token", store, newHerdrSocket(path, nil),
+	)
+	if _, err := d.refreshRoster(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	available = false
+	mu.Unlock()
+
+	if _, err := d.refreshRoster(context.Background()); err != nil {
+		t.Fatalf("refresh during a transient outage = %v", err)
+	}
+	if d.herdrReachable() {
+		t.Fatal("Herdr remained available after agent.list timed out")
+	}
+	d.mu.RLock()
+	roster := append([]WireAgent(nil), d.roster[defaultEnrollment]...)
+	d.mu.RUnlock()
+	if len(roster) != 1 || roster[0].Name != agent.Name {
+		t.Fatalf("roster = %#v; want the last healthy Herdr snapshot", roster)
+	}
+
+	mu.Lock()
+	available, present = true, false
+	mu.Unlock()
+	if _, err := d.refreshRoster(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !d.herdrReachable() {
+		t.Fatal("Herdr did not recover after agent.list succeeded")
+	}
+	d.mu.RLock()
+	roster = append([]WireAgent(nil), d.roster[defaultEnrollment]...)
+	d.mu.RUnlock()
+	if len(roster) != 0 {
+		t.Fatalf("recovered empty roster = %#v; a real departure must publish after Herdr recovers", roster)
 	}
 }
 

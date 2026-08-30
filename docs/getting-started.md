@@ -55,7 +55,7 @@ transit status
 The daemon picks the delivery adapter; you never choose one per message.
 
 - **Claude Code** installs the plugin in `daemon/plugin/claude`. Its `SessionStart` hook records the session id and transcript path, and its `transit-inbox` monitor registers the session with the daemon and injects envelopes.
-- **OMP and Pi** install the package in `daemon/contrib/omp-extension`. It registers `ctx.sessionManager.getSessionId()` and injects with `pi.sendUserMessage`.
+- **OMP and Pi** install the package in `daemon/contrib/omp-extension`. It registers `ctx.sessionManager.getSessionId()` and injects with `pi.sendMessage` in `nextTurn` mode, which stays out of the editable composer.
 - **OpenCode** installs `daemon/contrib/opencode-plugin/index.js` as a TUI plugin. It registers the selected root session and injects with `session.promptAsync`.
 - **Every other harness** falls back to Herdr `agent.prompt`, which needs `herdr.service` running.
 

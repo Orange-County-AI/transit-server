@@ -361,10 +361,12 @@ other harness.** Herdr injection drives a PTY: it needs `herdr.service`, reads
 the pane to protect a supported composer's unsent draft, targets a terminal
 container rather than a session, and cannot tell a resumed session from a new
 one. Native harnesses can identify the session that owns a delivery, avoiding
-those PTY identity failures, but they are not composer-guarded: a native adapter
-registers a harness session rather than a pane, and no harness API exposes
-composer state. A native delivery can therefore steer into the session while a
-person is composing.
+those PTY identity failures, and are composer-guarded against the pane the
+adapter declared at registration rather than the synthetic `native:` pane id on
+its roster entry. An adapter that declared no pane is headless and delivers
+unguarded; one whose declared pane cannot be read holds with retryable
+`draft_busy`, because a pane that cannot be checked is not a pane that has no
+composer.
 
 The socket is `<data dir>/agent.sock`, mode 0600, newline-delimited JSON,
 persistent and bidirectional — unlike the one-shot `transit.sock` used by the
@@ -391,8 +393,10 @@ adapter, which is what lets `send_message` work with `herdr.service` stopped.
 **Decision — a write is not an acknowledgement.** Claude's monitor writes the
 envelope to stdout and only acks once the delivery id appears in the session's
 `transcript_path`; on timeout it sends a retryable `deliver_nak`. OMP and Pi
-persist a receipt with `pi.appendEntry` after `pi.sendUserMessage` and rebuild
-the receipt set from the session branch on resume. OpenCode injects through
+persist a receipt with `pi.appendEntry` after `pi.sendMessage(..., { deliverAs:
+"nextTurn", triggerTurn: true })` — the hidden mode, which keeps the envelope
+out of the editable composer while still starting a turn on an idle session —
+and rebuild the receipt set from the session branch on resume. OpenCode injects through
 `session.promptAsync` and only acks after `session.messages` contains the
 delivery id; that persisted user message is its resume receipt. **Rationale:**
 acking before persistence drops a message in the write-to-disk gap;
@@ -519,6 +523,108 @@ sequenceDiagram
   External-->>Integration: post accepted
   Integration->>Integration: settled
 ```
+
+## Delivery observables report arrival, never execution
+
+**Decision — no liveness or consumer-health signal may be derived from the
+delivery observables alone.** Every fact this system records is produced by the
+delivery machinery itself, so each one reports that a *message moved*. None
+reports that an *agent acted*.
+
+| Observable | What it actually means | What readers assume |
+| --- | --- | --- |
+| `integration_delivery.attempts` | dispatch intent | arrivals |
+| the `sessionHeld` ack | the envelope is durable in the session branch | the agent acted on it |
+| `HostHub.hasAgent` | a daemon says this session is live | the agent can act |
+| `reportHealth` | connector status plus a roster entry | the path is working |
+| `deliveryLanded` | the id reached the pane's transcript | the turn executed |
+
+`deliveryLanded` is the subtlest and its precedence is load-bearing: the
+transcript check wins whenever `SessionTranscript()` is non-empty, and the
+`state_change_seq` comparison is reached only when it is empty. The comment at
+the prompt call site already says why the counter cannot carry more weight —
+"a state change proves nothing for an agent that was already working when the
+envelope arrived, which is every busy pane." The fallback is weak in the same
+direction as the primary: a stalled harness still accrues state changes from
+session restore, monitor ticks and failed turns.
+
+**Rationale:** measured on 2026-08-27. A workspace agent whose harness login had
+expired completed no turn for eight hours while every one of these read healthy:
+it acked deliveries, persisted them to its transcript, held a roster entry, kept
+its integration heartbeat green, and reported `agent_status: idle` throughout.
+Four successive alarm designs were built from these fields and all four failed
+review, because no combination of arrival-shaped facts yields an execution fact.
+
+**Consequence.** An agent contributes nothing to the plane except when it acts,
+so the absence of agent-contributed facts is permanently ambiguous between
+"nothing to say" and "cannot say anything". A correct `mark_handled` with no
+reply is indistinguishable from a dead harness at this layer. Detecting a harness
+that cannot act therefore requires an assertion that **costs a turn** — the one
+claim persistence cannot forge, because completing it requires the capability
+being measured. Until such a fact exists the pane text is the only witness, and
+it is the only artifact an agent cannot produce without running.
+
+A per-integration `oldest_unsettled_age` may be emitted *beside* the health ping
+as a channel-side signal. It must not be folded into `reportHealth`, whose
+consumers would then read a slow agent as a broken connector, and its threshold
+belongs to the alarm author: one value has to hold for the busiest and the
+quietest integration in a fleet. It covers channel deliveries only — agent and
+room traffic carry no `read_at` or `settled_at` at all.
+
+**Measured healthy baseline for that threshold**, taken 2026-08-28 on the
+busiest agent in the fleet — one under enough load that its harness was
+visibly deferring tool calls — carrying a real human Mattermost DM end to end:
+
+```
+created  01:16:32.884Z
+read_at  01:17:12.227Z   +39s   arrival to endpoint read
+settled  01:17:44.598Z   +32s   read to settlement
+                          72s   end to end, sends 1, arrivals 1
+```
+
+All three timestamps are control-plane values written by the same Worker, so
+the intervals are one clock subtracted from itself and carry no skew. State
+that, because the tempting comparison — a host-side receipt against a
+control-plane `created_at` — is two clocks. Measured on one fleet on
+2026-08-28, host and control plane agreed to within a second on the host that
+checked (three samples, 0.16s to 0.38s against the API's `Date` header) and
+the delivery path was sub-second across twelve consecutive deliveries spanning
+nineteen hours on one host, and sub-second in five of six arrivals on another
+— the sixth took 7.971 seconds from envelope to persisted write, between two
+hosts sharing one physical clock, with a same-sender control 137 seconds later
+at 0.125s. So the path is not systematically slow and is also not reliably
+sub-second: a single-digit-second outlier occurs and is not skew.
+A second host in the same fleet produced a receipt
+timestamped 2.4 seconds *before* the envelope it acknowledged, which is
+impossible as latency and is therefore the giveaway for an unsynchronised
+clock. Any cross-clock figure must state the host's measured offset first;
+within a single control-plane pair, no such caveat is needed.
+
+A stated send time is not a clock. On the same day a multi-second
+"creation to injection" interval was inferred fleet-wide, published, and
+retracted, because one side of the comparison was a human-typed estimate in
+prose formatted to look like telemetry. Timestamps that no instrument emitted
+cannot appear in a latency figure.
+
+What these numbers do *not* measure is when the agent's harness surfaced the
+envelope. `read_at` is when the endpoint called `read_message`, which is a
+control-plane event; the gap between a delivery being handed to a harness and
+that harness promoting it into a turn is invisible here and can legitimately
+exceed a minute on a busy agent.
+
+A threshold in seconds would therefore fire on healthy traffic; minutes is
+generous. The longest legitimate settlement observed on the same fleet was 84
+minutes, from an agent draining a saturated input queue in timestamp-disordered
+order. Any alarm must place its threshold between those two observations, and
+neither figure is transferable to a fleet with different load.
+
+That observation carries one send, one arrival and no retry, so it says nothing
+about whether those two counters are well named: they agree because there was
+nothing for them to disagree about. The defect this section exists to guard
+against — a rendered composite summing dispatch intent with arrivals — is
+invisible in exactly this shape of delivery. A clean case does not test the
+thing that lies, and a passing measurement is when nobody checks what it failed
+to cover.
 
 ## Enrollment and device credentials
 

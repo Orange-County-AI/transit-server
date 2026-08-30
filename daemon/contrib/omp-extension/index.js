@@ -9,6 +9,10 @@ export const RECEIPT_ENTRY_TYPE = "transit-delivery-receipt";
 // under it. No lineage file, no key to guess, no way for two sessions to
 // collide on one.
 export const IDENTITY_ENTRY_TYPE = "transit-agent-identity";
+// The custom-message type an arriving envelope is injected as. Naming it means
+// a transcript and a session branch both say where the entry came from, and a
+// renderer can be registered for it later without changing the wire.
+export const DELIVERY_MESSAGE_TYPE = "transit-delivery";
 
 const MAX_FRAME_BYTES = 1024 * 1024;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
@@ -259,16 +263,49 @@ export class TransitClient {
 	}
 
 	async #injectAndReceipt(id, envelope) {
+		// Refusing is the point. `sendUserMessage` is the API that ate a
+		// person's draft, so a build without `sendMessage` must fail loudly
+		// rather than quietly fall back to the thing being fixed. Not
+		// retryable: retrying cannot make an older OMP grow the API, and a
+		// dead entry with this code names the real problem.
+		if (typeof this.#pi.sendMessage !== "function") {
+			this.#queueControl({ t: "deliver_nak", id, code: "send_message_unsupported", retryable: false });
+			return;
+		}
+
 		try {
-			// OMP 17.4.2 supports steer on sendUserMessage. Unlike sendMessage,
-			// it does not support triggerTurn or nextTurn; an idle user message
-			// starts a turn and an active turn queues this as a steer.
-			await this.#pi.sendUserMessage(envelope, { deliverAs: "steer" });
+			// `sendUserMessage(..., { deliverAs: "steer" })` put the envelope
+			// in the EDITABLE pending-message UI — the same buffer the person
+			// is typing into — and an arriving delivery discarded whatever
+			// draft was there. `deliverAs: "nextTurn"` is the only mode OMP
+			// documents as keeping a message "hidden from the editable
+			// pending-message UI" (`sendMessage` in the installed
+			// extensibility/extensions/types.d.ts), and only `sendMessage`
+			// accepts it: `sendUserMessage` takes "steer"|"followUp" and
+			// nothing else, so it can never be quiet.
+			//
+			// `triggerTurn` is what keeps quiet from becoming never delivered.
+			// Without it a hidden message is appended and waits for whatever
+			// starts the next turn, which on an idle agent is a human typing —
+			// so a fleet agent nobody is watching would never act on its mail.
+			// With it, an idle session starts a turn on the delivery, and a
+			// streaming one consumes it when the current turn unwinds.
+			//
+			// Attribution stays OMP's default of "agent" on purpose. A custom
+			// message attributed to "user" is user-restorable, so clearing or
+			// dequeuing the queue would put this envelope back into the
+			// composer — reintroducing exactly the clobber being fixed.
+			// `display: true` keeps the delivery visible in the transcript,
+			// which is where it was visible before.
+			await this.#pi.sendMessage(
+				{ customType: DELIVERY_MESSAGE_TYPE, content: envelope, display: true, details: { id } },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
 		} catch (error) {
 			this.#queueControl({
 				t: "deliver_nak",
 				id,
-				code: errorCode(error, "send_user_message_failed"),
+				code: errorCode(error, "send_message_failed"),
 				retryable: true,
 			});
 			return;

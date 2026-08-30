@@ -100,8 +100,8 @@ func TestRosterIsPartitionedByOrganization(t *testing.T) {
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if names := rosterNames(d.roster[defaultEnrollment]); names != "here" {
-		t.Fatalf("default roster = %q; want the default adapter alone", names)
+	if names := rosterNames(d.roster[defaultEnrollment]); names != "here,paned" {
+		t.Fatalf("default roster = %q; want the default adapter and last healthy Herdr pane", names)
 	}
 	if names := rosterNames(d.roster["acme"]); names != "there" {
 		t.Fatalf("acme roster = %q; want the acme adapter alone", names)

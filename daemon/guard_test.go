@@ -46,6 +46,13 @@ func newGuardRig(t *testing.T, kind, screen string) *guardRig {
 		case "agent.list":
 			return map[string]any{"type": "agent_list", "agents": []HerdrAgent{agent}}, nil
 		case "agent.get":
+			// Herdr answers for the pane it knows and nothing else. The fake
+			// used to answer for any target, which made an adapter pointing at
+			// a pane this box has never seen look perfectly readable.
+			target, _ := params["target"].(string)
+			if target != agent.Name && target != agent.PaneID {
+				return nil, &HerdrAPIError{Code: "agent_not_found", Message: target}
+			}
 			return map[string]any{"type": "agent_info", "agent": agent}, nil
 		case "pane.read":
 			return map[string]any{"type": "pane_read", "read": map[string]any{"text": rig.screen}}, nil
@@ -479,5 +486,78 @@ func TestNativeDeliveryProceedsWithoutAPane(t *testing.T) {
 	code, _, _ := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
 	if code == "draft_busy" {
 		t.Fatal("an adapter with no pane was held on another agent's draft")
+	}
+}
+
+// The hole the native guard actually had. The guard looked its pane up by the
+// transit agent name, but a transit name is claimed independently of the pane's
+// Herdr name, so a session addressed as anything other than its pane's name
+// missed, fell through to "no pane", and was injected into on top of a person's
+// keystrokes. The adapter declares its real pane at registration; that is what
+// the guard reads now.
+func TestNativeDeliveryHoldsOnItsRegisteredPaneUnderADifferentName(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-draft.txt"))
+	adapter := registerAdapterDirect(t, rig.daemon, agentFrame{
+		T: "register", Proto: agentProtocol, Harness: "omp",
+		SessionID: "01a02b49-b517-7000-a194-7a928f701e18", Name: "courier",
+		PaneID: "titan:p1", Status: "idle",
+	})
+	// Without this the test could pass because the adapter adopted the pane's
+	// name, which is the case that already worked.
+	if adapter.name != "courier" || adapter.paneID != "titan:p1" {
+		t.Fatalf("adapter registered as %q in pane %q, want courier in titan:p1", adapter.name, adapter.paneID)
+	}
+	if _, found := rig.daemon.localAgentByName("courier"); found {
+		t.Fatal("a Herdr agent answers to courier; the old name lookup would have worked and the test proves nothing")
+	}
+
+	frame := WireFrame{ID: "tx_guard000014", Agent: "courier", Envelope: "<transit/>"}
+	code, retryable, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
+	if code != "draft_busy" || !retryable || err == nil {
+		t.Fatalf("native deliver into a draft = %q retryable=%t err=%v, want a retryable draft_busy hold",
+			code, retryable, err)
+	}
+	if prompts, keys, _ := rig.snapshot(); len(prompts) != 0 || len(keys) != 0 {
+		t.Fatalf("held native delivery touched the pane: prompts=%#v keys=%#v", prompts, keys)
+	}
+	holds := rig.daemon.draftHolds()
+	if len(holds) != 1 || holds[0].PaneID != "titan:p1" {
+		t.Fatalf("draft holds = %#v, want one on the adapter's declared pane", holds)
+	}
+	if rig.daemon.store.IncomingRecorded(frame.ID) {
+		t.Fatal("held delivery was recorded as received")
+	}
+}
+
+// An adapter that declares a pane this daemon cannot read is not the same fact
+// as an adapter with no pane, and the guard used to spell them the same way.
+// A declared pane means a person may be typing into it right now, so the
+// delivery waits — as a hold, which keeps the entry's attempt count — rather
+// than being injected on a guess. The screen here is empty on purpose: a
+// readable pane would deliver, so only the unreadable pane can produce the hold.
+func TestNativeDeliveryWaitsWhenItsDeclaredPaneCannotBeRead(t *testing.T) {
+	rig := newGuardRig(t, "omp", readScreenFixture(t, "omp-empty.txt"))
+	adapter := registerAdapterDirect(t, rig.daemon, agentFrame{
+		T: "register", Proto: agentProtocol, Harness: "omp",
+		SessionID: "01a02b49-b517-7000-a194-7a928f701e18", Name: "stranger",
+		PaneID: "titan:gone", Status: "idle",
+	})
+	// Closed so a fall-through to injection fails fast and loudly instead of
+	// blocking on the ack: what matters is which branch was taken.
+	_ = adapter.connection.Close()
+
+	frame := WireFrame{ID: "tx_guard000015", Agent: "stranger", Envelope: "<transit/>"}
+	code, retryable, err := rig.daemon.deliver(context.Background(), rig.daemon.defaultEnrollmentRuntime(), frame)
+	if code != "draft_busy" || !retryable || err == nil {
+		t.Fatalf("native deliver to an unreadable pane = %q retryable=%t err=%v, want a retryable draft_busy hold",
+			code, retryable, err)
+	}
+	// No pane to watch means no hold to record: releasing it is the Worker's
+	// backstop alarm and the next roster snapshot, not the hold poller.
+	if holds := rig.daemon.draftHolds(); len(holds) != 0 {
+		t.Fatalf("recorded a hold on a pane nothing can poll: %#v", holds)
+	}
+	if rig.daemon.store.IncomingRecorded(frame.ID) {
+		t.Fatal("held delivery was recorded as received")
 	}
 }

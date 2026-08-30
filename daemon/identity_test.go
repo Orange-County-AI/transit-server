@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 )
 
@@ -49,6 +50,61 @@ func TestIdentityIgnoresTheHarnessString(t *testing.T) {
 	}
 	if again.harness != "claude" {
 		t.Fatalf("harness = %q; the reported harness is still recorded as a label", again.harness)
+	}
+}
+
+// A Herdr-named adapter follows the pane it occupies. Before this reconciliation
+// a pane rename updated Herdr while Transit kept routing and authorizing the old
+// generated name, leaving the agent able to receive but unable to send.
+func TestRefreshRosterRekeysHerdrNamedAdapterAfterPaneRename(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{{Name: "claude-old", Kind: "claude", PaneID: "pane-1", Status: "idle"}}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	if _, err := d.refreshRoster(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	adapter := registerAdapterDirect(t, d, agentFrame{
+		Harness: "claude", SessionID: "session-1", PaneID: "pane-1",
+	})
+	if adapter.name != "claude-old" || adapter.namedBy != "herdr" {
+		t.Fatalf("initial adapter = %q/%q; want the Herdr pane name", adapter.name, adapter.namedBy)
+	}
+
+	agents[0].Name = "main"
+	if _, err := d.refreshRoster(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.name != "main" || adapter.namedBy != "herdr" {
+		t.Fatalf("renamed adapter = %q/%q; want main/herdr", adapter.name, adapter.namedBy)
+	}
+	if d.nativeAdapterByName(defaultEnrollment, "claude-old") != nil {
+		t.Fatal("the stale generated name still routes to the adapter")
+	}
+	if d.nativeAdapterByName(defaultEnrollment, "main") != adapter {
+		t.Fatal("the current pane name does not route to the adapter")
+	}
+	if record := d.nativeNames[adapter.key]; record.Name != "main" || record.NamedBy != "herdr" {
+		t.Fatalf("persisted name = %#v; want main/herdr", record)
+	}
+}
+
+func TestRefreshRosterDoesNotOverrideExplicitTransitName(t *testing.T) {
+	var prompts int
+	agents := []HerdrAgent{{Name: "pane-name", Kind: "omp", PaneID: "pane-1", Status: "idle"}}
+	d, _ := newAdapterTestDaemon(t, "prefer", agents, &prompts)
+	if _, err := d.refreshRoster(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	adapter := registerAdapterDirect(t, d, agentFrame{
+		Harness: "omp", SessionID: "session-1", PaneID: "pane-1", Name: "declared-name",
+	})
+
+	agents[0].Name = "renamed-pane"
+	if _, err := d.refreshRoster(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.name != "declared-name" || adapter.namedBy != "user" {
+		t.Fatalf("adapter = %q/%q; an explicit Transit name must outrank the Herdr pane", adapter.name, adapter.namedBy)
 	}
 }
 

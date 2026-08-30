@@ -450,8 +450,19 @@ func (d *Daemon) claimNativeAdapterName(adapter *agentAdapter, name string) (add
 		return "", fmt.Errorf("invalid or reserved agent name %q", name)
 	}
 	d.mu.Lock()
+	host, err := d.renameNativeAdapterLocked(adapter, name, "user")
+	d.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	d.notifyRoster()
+	return name + "@" + host, nil
+}
+
+// renameNativeAdapterLocked updates the live route and its durable identity
+// record as one transaction. The caller holds d.mu.
+func (d *Daemon) renameNativeAdapterLocked(adapter *agentAdapter, name, namedBy string) (host string, err error) {
 	if err := d.nativeNameClaimErrorLocked(adapter, name); err != nil {
-		d.mu.Unlock()
 		return "", err
 	}
 	previousName := adapter.name
@@ -460,12 +471,12 @@ func (d *Daemon) claimNativeAdapterName(adapter *agentAdapter, name string) (add
 	previousRecord := d.nativeNames[adapter.key]
 	generation := previousRecord.Generation + 1
 	adapter.name = name
-	adapter.namedBy = "user"
+	adapter.namedBy = namedBy
 	adapter.generation = generation
-	// The token is the identity, not the name: a claim renames the agent and
-	// must leave the credential that recovers it alone.
+	// The token is the identity, not the name: a rename must leave the
+	// credential that recovers it alone.
 	d.nativeNames[adapter.key] = nativeName{
-		Name: name, NamedBy: "user", Generation: generation,
+		Name: name, NamedBy: namedBy, Generation: generation,
 		Token: previousRecord.Token, Enrollment: adapter.enrollment,
 	}
 	if err := d.saveNativeNamesLocked(); err != nil {
@@ -473,15 +484,43 @@ func (d *Daemon) claimNativeAdapterName(adapter *agentAdapter, name string) (add
 		adapter.namedBy = previousNamedBy
 		adapter.generation = previousGeneration
 		d.nativeNames[adapter.key] = previousRecord
-		d.mu.Unlock()
 		return "", err
 	}
 	d.unbindNativeNameLocked(adapter.enrollment, previousName, adapter)
 	d.bindNativeNameLocked(adapter.enrollment, name, adapter)
-	host := d.enrollmentHostLocked(adapter.enrollment)
-	d.mu.Unlock()
-	d.notifyRoster()
-	return name + "@" + host, nil
+	return d.enrollmentHostLocked(adapter.enrollment), nil
+}
+
+// reconcileHerdrAdapterNames follows pane renames only for adapters whose name
+// came from Herdr. Explicit Transit claims remain authoritative.
+func (d *Daemon) reconcileHerdrAdapterNames(agents []HerdrAgent) {
+	namesByPane := make(map[string]string, len(agents))
+	for _, agent := range agents {
+		if agent.PaneID != "" && namePattern.MatchString(agent.Name) && !reservedNames[agent.Name] {
+			namesByPane[agent.PaneID] = agent.Name
+		}
+	}
+	d.mu.RLock()
+	candidates := make([]*agentAdapter, 0)
+	for _, adapter := range d.adapters {
+		if name := namesByPane[adapter.paneID]; adapter.namedBy == "herdr" && name != "" && name != adapter.name {
+			candidates = append(candidates, adapter)
+		}
+	}
+	d.mu.RUnlock()
+	for _, adapter := range candidates {
+		name := namesByPane[adapter.paneID]
+		d.mu.Lock()
+		if d.adapters[adapter.key] != adapter || adapter.namedBy != "herdr" || adapter.name == name {
+			d.mu.Unlock()
+			continue
+		}
+		_, err := d.renameNativeAdapterLocked(adapter, name, "herdr")
+		d.mu.Unlock()
+		if err != nil {
+			d.logf("adapter pane rename %s -> %s: %v", adapter.paneID, name, err)
+		}
+	}
 }
 
 func (adapter *agentAdapter) write(frame agentFrame) error {
@@ -794,6 +833,27 @@ func (d *Daemon) nativeAdapterByName(enrollment, name string) *agentAdapter {
 	adapter := d.nativeAdapterLocked(enrollment, name)
 	d.mu.RUnlock()
 	return adapter
+}
+
+// uniqueNativeAdapterByPane resolves a pane only when exactly one live adapter
+// declares it. IPC helpers are not always descendants of the harness process,
+// so pid ancestry can miss even though the request carries the real pane id.
+func (d *Daemon) uniqueNativeAdapterByPane(paneID string) (adapter *agentAdapter, ambiguous bool) {
+	if paneID == "" {
+		return nil, false
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, candidate := range d.adapters {
+		if candidate.paneID != paneID {
+			continue
+		}
+		if adapter != nil && adapter != candidate {
+			return nil, true
+		}
+		adapter = candidate
+	}
+	return adapter, false
 }
 
 func (d *Daemon) nativeNamesPath() string { return filepath.Join(d.store.root, "native_names.json") }
