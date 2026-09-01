@@ -67,7 +67,7 @@ Enrollment persists the selected server origin. See [Hosts and the daemon](docs/
 - [Transit protocols](docs/protocols.md)
 - [Transit security model](docs/security.md)
 
-`SKILL.md` is served directly by each Worker at `/SKILL.md` for harnesses that install Transit guidance.
+`SKILL.md` is served directly by each Worker at `/SKILL.md` for harnesses that install Transit guidance. `transit skill` prints it, and `transit skill install` / `transit skill uninstall` manage it at the user level through `npx skills`.
 
 ## License
 
