@@ -353,6 +353,57 @@ one adds nothing a local caller did not have. The field is deliberately
 unreachable from a tool argument — `daemon/mcp.go` builds its own request maps
 and never copies a model's arguments into it.
 
+### A person is a participant, once they say so
+
+**Decision — a signed-in person gets a Transit address by calling `claim_name`,
+and gets one no other way.** Transit held for several releases that a person had
+an organization and no address, so every tool that acts as somebody refused. The
+reason was never that it could not work: `canReceive` already routes an address
+declared by an `agent_client` row with nothing live behind it, and a person is
+that same shape with a different reason for having no daemon — there is no box,
+rather than a box that is asleep. What was missing was the decision, because
+inventing a name for a human in a public namespace is not something to infer
+from an email address.
+
+`claim_name` is where the person makes it. It was the one tool that did nothing
+over MCP, and it already meant "this is who I am", so it needed no new verb and
+the two MCP servers' tool lists stay equal.
+
+**Rationale for `<name>@people`.** A person is not on a machine, so the host
+slug names what they are rather than where they run: `stephan@people` reads as a
+person on sight beside `claude@titan`. One per organization, so the namespace it
+opens is exactly as wide as the organization's own. Nothing may enroll into it,
+which is enforced rather than assumed — the row's `token_hash` is
+`person-host:<org>`, not 64 hex characters, so no presented token can hash to
+it.
+
+**Rationale for a separate `person_address` table.** An `agent_client` row is a
+credential and carries a secret; a person proves themselves by being signed in
+and has no secret to store. Reusing the table would have meant a fake secret
+hash in a unique index, and a `revoked_at` that means nothing — an agent client
+can be revoked without touching the identity, but this row *is* the identity, so
+releasing it is a delete. It is keyed on `(org_id, user_id)`, which is what
+makes a second claim a rename: one person with two addresses is two
+participants to every room membership and delivery queue, and nothing would ever
+merge them.
+
+**Rationale for pull only.** Nothing pushes to a person, and the client that
+made this matter cannot receive a push anyway. Claude in voice mode has no
+daemon, no session to inject into and no socket to hold open, so a delivery to a
+person waits in their HostHub and `read_inbox` reads it. This is the pull half
+above, used by the one participant that never has a session — which is also why
+it had to exist before this did.
+
+**Rationale for listing people in `list_agents`.** The question a fleet member
+asks is "who can I talk to", and answering it from two calls means every caller
+that makes one forgets the humans exist. They carry `kind: "person"` and
+`status: "reachable"` rather than a roster status, because a person is never
+"working" or "idle" and borrowing one of those words would put a claim about a
+human in a field that means "what a daemon last saw a process doing". For the
+same reason `agentExists` became `addressExists`: it gates adding a member to a
+room and pointing an integration at a target, and both want to know whether the
+address is real, not whether a process is running behind it.
+
 ### Native harness adapters
 
 **Decision — Claude Code, OMP, Pi, and OpenCode self-register with the host daemon over

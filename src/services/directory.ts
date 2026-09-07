@@ -1,6 +1,7 @@
 import { formatAgentAddress, formatRoomAddress } from "../lib/transit/addr";
 import { resolveConnectedOrganization } from "../lib/transit/organizations";
 import { ServiceError } from "./errors";
+import { listPeople } from "./person";
 
 /**
  * Who and what exists in a fleet, answered once.
@@ -20,6 +21,14 @@ import { ServiceError } from "./errors";
 
 export type AgentListing = {
   name: string;
+  /**
+   * What is at this address. A daemon publishes the harness — `claude`, `omp`,
+   * and so on — and `person` is the one value no daemon can publish: a
+   * signed-in human who claimed a name. It is in this listing rather than a
+   * separate one because the question an agent asks is "who can I talk to",
+   * and answering it in two calls means every caller that makes one forgets
+   * the humans exist.
+   */
   kind: string;
   pane_id: string;
   status: string;
@@ -93,9 +102,30 @@ export async function listAgents(
         )
         .bind(scope.org);
   const agents = (await statement.all<AgentListing>()).results;
-  if (!scope.slug) return agents;
+  // People come from their own table and carry no session facts, so the columns
+  // a roster fills are empty rather than invented. `status` is `reachable`
+  // instead of a roster status: a person is never "working" or "idle", and
+  // borrowing one of those words would put a claim about a human in a field
+  // that means "what a daemon last saw a process doing".
+  const people = (await listPeople(db, { org: scope.org, host: input.host })).map(
+    (person): AgentListing => ({
+      name: person.name,
+      kind: "person",
+      pane_id: "",
+      status: "reachable",
+      named_by: "user",
+      title: "",
+      cwd: "",
+      host: person.host,
+      updated_at: person.created_at,
+    }),
+  );
+  const listing = [...agents, ...people].sort(
+    (a, b) => a.host.localeCompare(b.host) || a.name.localeCompare(b.name),
+  );
+  if (!scope.slug) return listing;
   const slug = scope.slug;
-  return agents.map((agent) => ({
+  return listing.map((agent) => ({
     ...agent,
     organization: slug,
     address: formatAgentAddress(agent.name, agent.host, slug),
@@ -157,8 +187,21 @@ export async function listRooms(
   }));
 }
 
-/** Whether a live agent by this name exists on this host, in this org. */
-export async function agentExists(
+/**
+ * Whether this address exists on this host, in this org.
+ *
+ * Two things can be at one: a live agent, which a daemon publishes into
+ * `agent_snapshot`, or a person who claimed the name. Both are addresses an
+ * operator can add to a room or point an integration at, so both answer yes —
+ * a check that saw only the roster reported `agent_not_found` for a person who
+ * demonstrably existed, which reads as a bug in the dashboard rather than as a
+ * rule.
+ *
+ * Named for the address rather than the agent because of exactly that: the
+ * question every caller asks here is whether the address is real, not whether
+ * a process is running behind it.
+ */
+export async function addressExists(
   db: D1Database,
   input: { org: string; host: string; name: string },
 ): Promise<boolean> {
@@ -168,9 +211,13 @@ export async function agentExists(
         `SELECT 1 AS present
          FROM agent_snapshot a JOIN host h ON h.id = a.host_id
          WHERE h.org_id = ? AND h.slug = ? AND a.name = ? AND h.revoked_at IS NULL
+         UNION ALL
+         SELECT 1 AS present
+         FROM person_address p JOIN host h ON h.org_id = p.org_id AND h.slug = p.host
+         WHERE p.org_id = ? AND p.host = ? AND p.name = ? AND h.revoked_at IS NULL
          LIMIT 1`,
       )
-      .bind(input.org, input.host, input.name)
+      .bind(input.org, input.host, input.name, input.org, input.host, input.name)
       .first(),
   );
 }

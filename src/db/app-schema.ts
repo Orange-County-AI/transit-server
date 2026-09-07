@@ -68,6 +68,41 @@ export const agentClient = sqliteTable(
   ],
 );
 
+/**
+ * A signed-in person's own Transit address.
+ *
+ * The counterpart to `agent_client`: that row declares an address an agent
+ * proves with a secret, this one declares an address a person proves by being
+ * signed in. Both make an address routable with no daemon behind it, and both
+ * are consulted by `HostHub.canReceive` for exactly that reason.
+ *
+ * Keyed on `(org_id, user_id)`, so a second claim renames rather than adding a
+ * second identity — two addresses for one person would be two participants to
+ * every room membership and delivery queue, with nothing to merge them back.
+ *
+ * There is deliberately no `revoked_at`. An agent client is a credential and
+ * can be revoked without touching the identity; this row IS the identity, and
+ * releasing it is a delete.
+ */
+export const personAddress = sqliteTable(
+  "person_address",
+  {
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    host: text("host").notNull(),
+    name: text("name").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.orgId, table.userId] }),
+    uniqueIndex("person_address_org_host_name_unique").on(
+      table.orgId,
+      table.host,
+      table.name,
+    ),
+  ],
+);
+
 export const enrollCode = sqliteTable(
   "enroll_code",
   {

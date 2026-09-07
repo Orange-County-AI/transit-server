@@ -2,6 +2,7 @@ import type { HostIdentity, RpcOutcome } from "../do/host-hub";
 import { txId } from "../lib/transit/ids";
 import { listAgents, listRooms } from "../services/directory";
 import { ServiceError } from "../services/errors";
+import { claimPersonAddress } from "../services/person";
 import { type McpPrincipal, principalAddress } from "./principal";
 
 /** A tool's answer, in the two shapes `tools/call` can render. */
@@ -29,37 +30,53 @@ function optional(args: Record<string, unknown>, key: string): string | undefine
 }
 
 /**
- * The host a principal acts on. A signed-in person has none — they hold an
- * organization, not an address — so every tool that reaches a HostHub stops
- * here rather than inventing one. Giving a human an agent-shaped address is a
- * real decision about a public namespace, not something to infer.
+ * The host a principal acts on. A signed-in person who has not claimed an
+ * address has none, so every tool that reaches a HostHub stops here rather than
+ * inventing one. Giving a human an agent-shaped address is a real decision
+ * about a public namespace, so the person makes it with `claim_name`; nothing
+ * here infers it.
  */
 function identityOf(principal: McpPrincipal): HostIdentity {
   if (!principal.host || !principal.hostId) {
-    fail(
-      "this tool acts from a host, and this credential is not bound to one; " +
-        "a signed-in person is not yet a Transit participant",
-    );
+    fail(unclaimed(principal, "this tool acts from a host"));
   }
   return { hostId: principal.hostId, org: principal.org, slug: principal.host };
+}
+
+/**
+ * How a caller with no address is told so, in the terms that caller can act on.
+ *
+ * Two different things can be missing and they need different answers, because
+ * each has a different fix and a caller told the wrong one stops. A signed-in
+ * person has no address until they claim one, and the sentence must name the
+ * tool that does it — this is the ordinary first call for a person reaching
+ * Transit through Claude, not an error state. Anything else is a credential
+ * genuinely not bound to a host, and no argument will change that.
+ */
+function unclaimed(principal: McpPrincipal, lead: string): string {
+  if (principal.credential === "user_session") {
+    return (
+      `${lead}, and you have not claimed a Transit address yet; ` +
+      "call claim_name with the name you want to be known by, " +
+      "then this tool works"
+    );
+  }
+  return `${lead}, and this credential is not bound to a host`;
 }
 
 /**
  * The acting agent, for the tools that act as somebody rather than merely read.
  *
  * Two different things can be missing and they need different answers. A
- * credential bound to no host at all is a signed-in person, and no header will
- * fix that — the address does not exist yet. A host-scoped credential that
- * simply did not say who it is can fix it, and must be told how: an agent that
- * reads "unauthorized" here will conclude its token is wrong and stop.
+ * credential bound to no host at all cannot be fixed by a header — the address
+ * does not exist yet, and for a person the fix is `claim_name`. A host-scoped
+ * credential that simply did not say who it is can fix it, and must be told
+ * how: an agent that reads "unauthorized" here will conclude its token is wrong
+ * and stop.
  */
 function actor(principal: McpPrincipal): string {
   if (!principal.host) {
-    fail(
-      "this tool acts as an agent, and this credential is not bound to a host; " +
-        "a signed-in person is not yet a Transit participant and has no address " +
-        "to act from",
-    );
+    fail(unclaimed(principal, "this tool acts as an agent"));
   }
   const address = principalAddress(principal);
   if (!address) {
@@ -255,26 +272,41 @@ async function runTool(
       return `${name} ${room}`;
     }
     case "whoami": {
-      // A signed-in person holds an organization and no address. Saying that
-      // plainly beats both an error, which reads as a broken credential, and a
-      // fabricated address, which would be the phase-5 decision made by
-      // accident.
+      // A signed-in person who has not claimed a name holds an organization and
+      // no address. Saying that plainly beats both an error, which reads as a
+      // broken credential, and a fabricated address, which would make the
+      // namespace decision by accident.
       if (!principal.host) {
-        return `signed-in person (organization ${principal.org}); not yet a Transit participant, so this credential has no address to act from`;
+        return `signed-in person (organization ${principal.org}); no Transit address yet — call claim_name with the name you want to be known by`;
       }
       const status = await hub(env, principal).status();
       const address = principalAddress(principal);
       return `${address ?? `(unnamed)@${principal.host}`} (connected: ${status.connected})`;
     }
-    case "claim_name":
-      // The stdio server renames a live pane through the local adapter. A
-      // credential has no pane, and its name is whatever the credential says
-      // it is, so there is nothing here to rename. Saying so beats a rename
-      // that appears to work and binds nothing.
+    case "claim_name": {
+      // For a person this is the real thing, and the only tool that works
+      // before they have an address: it mints the `person_address` row the
+      // principal is built from, so every other tool starts working on the
+      // next request. Calling it again renames, because the row is keyed on
+      // the person rather than on the name.
+      if (principal.credential === "user_session") {
+        if (!principal.userId) fail("this credential has no signed-in person");
+        const claimed = await claimPersonAddress(env.DB, {
+          org: principal.org,
+          userId: principal.userId,
+          name: required(args, "name"),
+        });
+        return `${claimed.name}@${claimed.host}`;
+      }
+      // The stdio server renames a live pane through the local adapter. An
+      // agent credential has no pane, and its name is whatever the credential
+      // says it is, so there is nothing here to rename. Saying so beats a
+      // rename that appears to work and binds nothing.
       return fail(
         "claim_name is a local-session operation; over MCP an agent's name comes " +
           "from its credential and is changed by reissuing that credential",
       );
+    }
     default:
       return fail(`unknown tool: ${name}`);
   }

@@ -269,11 +269,30 @@ gated behind an organization owner or admin, so `registration_endpoint` is
 deliberately absent from the metadata and an operator supplies the client id and
 secret to Claude as a custom connector.
 
-**A signed-in person is not yet a Transit participant.** They hold an
-organization and no address, so `list_agents`, `list_rooms` and `whoami` work
-and every tool that acts *as* an agent refuses, naming the reason. Giving a
-human an agent-shaped address is a decision about a public namespace, not
-something to infer.
+**A signed-in person becomes a participant by claiming a name.** They arrive
+holding an organization and no address, so `list_agents`, `list_rooms`,
+`whoami` and `claim_name` work and every tool that acts *as* an agent refuses,
+naming `claim_name` as the fix. `claim_name` then writes a `person_address` row
+and the address is live on the next request — `<name>@people`, one person host
+per organization.
+
+Giving a human an agent-shaped address is a decision about a public namespace,
+so the person makes it and nothing infers it. In particular `X-Transit-Agent` is
+never read for a person: a device token's header restates authority that token
+already holds, while a browser session holds none over a name at all.
+
+The address routes exactly the way a daemonless agent's does. No daemon can
+enroll the `people` host — its `token_hash` is a string no SHA-256 can equal —
+so nothing is ever pushed to a person; `HostHub.canReceive` accepts the address
+on the strength of the row, the delivery waits in the queue, and `read_inbox`
+and `read_room` read it back. That is what makes the surface usable from a
+client with no session to push into, which is every voice conversation.
+
+A second `claim_name` renames rather than adding an identity, because one
+person with two addresses is two participants to every room membership and
+delivery queue. The name must be free of every other claim on that host, and
+`list_agents` reports people alongside agents with `kind: "person"` so a fleet
+member asking who it can talk to sees the humans.
 
 ## `transit-wire/1` daemon-to-Worker WebSocket
 

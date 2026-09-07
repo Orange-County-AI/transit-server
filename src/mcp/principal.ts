@@ -1,6 +1,7 @@
 import { AddressError, formatAgentAddress, validateName } from "../lib/transit/addr";
 import { sha256hex } from "../lib/transit/crypto";
 import { looksLikeJwt } from "../lib/transit/jwt";
+import { resolvePersonAddress } from "../services/person";
 import { agentTokenSubject } from "./agent-token";
 
 /**
@@ -11,8 +12,8 @@ import { agentTokenSubject } from "./agent-token";
 export type McpPrincipal = {
   org: string;
   /**
-   * Host slug, or null for a principal that is not on a host at all — today
-   * that means a signed-in person. Durable Object names are
+   * Host slug, or null for a principal that is not on a host at all — a
+   * signed-in person who has not claimed an address. Durable Object names are
    * `org:<org>:host:<host>`, so a null host is a principal that cannot reach a
    * HostHub and therefore cannot act as an agent.
    */
@@ -91,9 +92,18 @@ export async function resolvePrincipal(
 
 /**
  * A signed-in person, reached through the authorization-code flow Claude
- * performs. They have an organization and no address: `host` and `name` are
- * null, so every tool that acts AS an agent refuses with a message saying so,
- * and the ones that only observe work.
+ * performs.
+ *
+ * They start with an organization and no address — `host` and `name` null, so
+ * every tool that acts AS an agent refuses and the ones that only observe work.
+ * Once they claim one with `claim_name`, the `person_address` row fills those
+ * two fields and they are a participant like any other.
+ *
+ * The address comes from the row and from nothing else. `X-Transit-Agent` is
+ * not read here, not merged and not preferred: for a device token that header
+ * restates authority the token already carries, but a person's session carries
+ * no authority over a name at all, so honouring it would let anyone signed in
+ * speak as anyone.
  */
 async function resolveUserSession(
   env: Env,
@@ -122,13 +132,17 @@ async function resolveUserSession(
     .bind(session.userId, session.userId)
     .first<{ organization_id: string }>();
   if (!membership) return UNAUTHORIZED;
+  const person = await resolvePersonAddress(env.DB, {
+    org: membership.organization_id,
+    userId: session.userId,
+  });
   return {
     ok: true,
     principal: {
       org: membership.organization_id,
-      host: null,
-      hostId: null,
-      name: null,
+      host: person?.host ?? null,
+      hostId: person?.hostId ?? null,
+      name: person?.name ?? null,
       credential: "user_session",
       userId: session.userId,
       ...(session.scopes ? { scope: session.scopes } : {}),

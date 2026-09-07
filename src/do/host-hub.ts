@@ -307,7 +307,10 @@ export class HostHub extends DurableObject<Env> {
    * live". A live `agent_client` row is the other, and it means something
    * different but no weaker: this address was DECLARED, durably, by an operator,
    * and the agent holds a credential proving it. Delivery to it waits in this
-   * hub's queue until the agent reads it.
+   * hub's queue until the agent reads it. A `person_address` row is the same
+   * declaration made by a signed-in person about themselves — see
+   * `services/person.ts` — and reads identically here, because a person with no
+   * daemon and an agent with no daemon are the same routing problem.
    *
    * That declaration is what makes the address routable, which is why a device
    * token asserting a name in a header does not: the assertion lives for one
@@ -343,9 +346,14 @@ export class HostHub extends DurableObject<Env> {
          FROM agent_client c JOIN host h ON h.org_id = c.org_id AND h.slug = c.host
          WHERE c.org_id = ? AND c.host = ? AND c.name = ?
            AND c.revoked_at IS NULL AND h.revoked_at IS NULL
+         UNION ALL
+         SELECT 1 AS present
+         FROM person_address p JOIN host h ON h.org_id = p.org_id AND h.slug = p.host
+         WHERE p.org_id = ? AND p.host = ? AND p.name = ?
+           AND h.revoked_at IS NULL
          LIMIT 1`,
       )
-        .bind(org, host, name)
+        .bind(org, host, name, org, host, name)
         .first(),
     );
   }

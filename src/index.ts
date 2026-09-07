@@ -68,11 +68,12 @@ import {
 import { handleMcp } from "./mcp/http";
 import { handleTokenRequest } from "./mcp/oauth";
 import {
-  agentExists,
+  addressExists,
   integrationForDelivery,
   listAgents,
   listRooms,
 } from "./services/directory";
+import { PERSON_HOST_SLUG } from "./services/person";
 import { ServiceError } from "./services/errors";
 import { HostHub } from "./do/host-hub";
 import { HEALTH_CONFIG_FIELD, Integration } from "./do/integration";
@@ -312,7 +313,7 @@ async function targetExists(
     );
   }
   if (parsed.organization) return false;
-  return agentExists(context.env.DB, {
+  return addressExists(context.env.DB, {
     org,
     host: parsed.host,
     name: parsed.name,
@@ -1207,16 +1208,21 @@ app.get("/api/hosts", async (context) => {
   const org = await sessionOrg(context);
   if (!org) return context.json({ error: "Unauthorized" }, 401);
 
+  // The person host is left out on purpose. It is how a human's address is
+  // spelled, not a box anybody enrolled: it has no daemon, can never have one,
+  // and listing it here offers an operator a token fingerprint to compare and a
+  // revoke button to press, both of which are traps. People show up where they
+  // are actually addressable, in the agent listing, as `kind: "person"`.
   const rows = await context.env.DB.prepare(
     `SELECT h.id, h.slug, h.daemon_ver, h.last_seen_at, h.token_issued_at,
             substr(h.token_hash, 1, 8) AS token_fingerprint,
             COUNT(a.name) AS agent_count
      FROM host h LEFT JOIN agent_snapshot a ON a.host_id = h.id
-     WHERE h.org_id = ? AND h.revoked_at IS NULL
+     WHERE h.org_id = ? AND h.revoked_at IS NULL AND h.slug <> ?
      GROUP BY h.id
      ORDER BY h.slug`,
   )
-    .bind(org)
+    .bind(org, PERSON_HOST_SLUG)
     .all<{
       id: string;
       slug: string;
@@ -1254,6 +1260,11 @@ app.delete("/api/hosts/:slug", async (context) => {
   } catch {
     return context.json({ error: "host_not_found" }, 404);
   }
+  // Revoking the person host would take every claimed human address in the
+  // organization with it, silently — `canReceive` and `addressExists` both join
+  // through the host row. It is not listed as a host either, so this reads as
+  // absent rather than as forbidden.
+  if (slug === PERSON_HOST_SLUG) return context.json({ error: "host_not_found" }, 404);
 
   const result = await context.env.DB.prepare(
     "UPDATE host SET revoked_at = ? WHERE org_id = ? AND slug = ? AND revoked_at IS NULL",
@@ -1427,7 +1438,7 @@ app.post("/api/rooms/:name/members", async (context) => {
   }
   const memberOrg = connected?.targetOrgId ?? org;
   if (
-    !(await agentExists(context.env.DB, {
+    !(await addressExists(context.env.DB, {
       org: memberOrg,
       host: address.host,
       name: address.name,
