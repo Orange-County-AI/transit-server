@@ -11,10 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -303,71 +301,6 @@ func (d *Daemon) handleAgentControl(adapter *agentAdapter, frame agentFrame) {
 	default:
 		// Forward compatibility: unknown control frames are ignored.
 	}
-}
-
-func agentPeerCredentials(connection net.Conn) (int, int, error) {
-	unixConnection, ok := connection.(*net.UnixConn)
-	if !ok {
-		return 0, 0, fmt.Errorf("agent socket is not a Unix connection")
-	}
-	raw, err := unixConnection.SyscallConn()
-	if err != nil {
-		return 0, 0, err
-	}
-	var credentials *syscall.Ucred
-	var controlErr error
-	err = raw.Control(func(fd uintptr) {
-		credentials, controlErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	})
-	if err != nil {
-		return 0, 0, err
-	}
-	if controlErr != nil || credentials == nil {
-		return 0, 0, controlErr
-	}
-	return int(credentials.Pid), int(credentials.Uid), nil
-}
-func processStartTime(pid int) (uint64, error) {
-	fields, err := processStatFields(pid)
-	if err != nil {
-		return 0, err
-	}
-	if len(fields) < 20 {
-		return 0, fmt.Errorf("short /proc/%d/stat", pid)
-	}
-	start, err := strconv.ParseUint(fields[19], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse /proc/%d start time: %w", pid, err)
-	}
-	return start, nil
-}
-
-func processParentPID(pid int) (int, error) {
-	fields, err := processStatFields(pid)
-	if err != nil {
-		return 0, err
-	}
-	if len(fields) < 2 {
-		return 0, fmt.Errorf("short /proc/%d/stat", pid)
-	}
-	parent, err := strconv.Atoi(fields[1])
-	if err != nil {
-		return 0, fmt.Errorf("parse /proc/%d parent pid: %w", pid, err)
-	}
-	return parent, nil
-}
-
-func processStatFields(pid int) ([]string, error) {
-	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return nil, err
-	}
-	rest := string(data)
-	index := strings.LastIndex(rest, ")")
-	if index < 0 {
-		return nil, fmt.Errorf("invalid /proc/%d/stat", pid)
-	}
-	return strings.Fields(rest[index+1:]), nil
 }
 
 // adapterByProcess walks pid's PPID chain (bounded, max 16 hops, stop at
