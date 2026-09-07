@@ -182,9 +182,12 @@ transit inbox --waiting <agent>
 transit room <name> --agent <agent>
 transit pause
 transit pause --toggle
+transit skill
+transit skill install
+transit skill uninstall
 ```
 
-`transit status --ensure-daemon` starts a detached daemon when none is running, and prints `herdr: unavailable` when the Herdr socket did not answer — an unremarkable line on a host that has no Herdr and does not need one. `transit status --kick` refreshes the roster and outbox. `transit pause` reports whether delivery is paused, while `--toggle` changes that state.
+`transit status --ensure-daemon` starts a detached daemon when none is running, and prints `herdr: unavailable` when the Herdr socket did not answer — an unremarkable line on a host that has no Herdr and does not need one. `transit status --kick` refreshes the roster and outbox. `transit pause` reports whether delivery is paused, while `--toggle` changes that state. `transit skill` prints the agent skill this host's server serves, and its `install` and `uninstall` subcommands add or remove it at the user level through `npx skills`. See [Agent skill](agent-skill.md).
 
 The three read commands answer three different questions, which is worth being exact about:
 

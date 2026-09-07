@@ -2,11 +2,25 @@
 
 The Transit skill gives an agent the operating rules that make delivery safe: how to interpret an envelope, prevent duplicate work, read a complete channel delivery, and settle it exactly once. Install it wherever agents use the Transit MCP server.
 
+## Read, install, and remove it from the daemon
+
+The `transit` CLI carries the whole lifecycle, so a host that already has the daemon needs no URL and no browser:
+
+```bash
+transit skill                  # print the skill this host's server serves
+transit skill install          # install it at the user level for Claude Code
+transit skill uninstall        # remove it again
+```
+
+`transit skill` prints the copy served by the server this host is enrolled against, falling back to `TRANSIT_URL` and then the public server when the box is not enrolled yet; `--url <server>` reads a different one. It is a read: nothing is written to disk and no harness has to be installed to answer "what does Transit tell my agents to do".
+
+`transit skill install` and `transit skill uninstall` shell out to `npx skills`, which owns where each harness keeps its skills. Install fetches from [github.com/Orange-County-AI/transit-server](https://github.com/Orange-County-AI/transit-server) and installs globally — user level, not the directory you happened to run it from. `--agent` selects harnesses (`claude-code` by default, `*` for all) and `--repo` installs from a fork. Uninstall removes every agent link unless `--agent` narrows it. Both need `npx` on `PATH`; without it the CLI prints the exact `npx` command to run by hand.
+
 ## Canonical source
 
-The hosted service serves the canonical skill at [https://transit.orangecountyai.com/SKILL.md](https://transit.orangecountyai.com/SKILL.md). A self-hosted Worker serves the same guidance at `https://<your-server>/SKILL.md`; install from the server your daemon uses.
+The hosted service serves the canonical skill at [https://transit.orangecountyai.com/SKILL.md](https://transit.orangecountyai.com/SKILL.md). A self-hosted Worker serves the same guidance at `https://<your-server>/SKILL.md`; a host enrolled against it reads that copy with `transit skill`.
 
-Install the skill for Claude Code with:
+Installing from a server URL rather than from GitHub is equivalent:
 
 ```bash
 npx skills add https://<your-server>/SKILL.md -g -a claude-code -y

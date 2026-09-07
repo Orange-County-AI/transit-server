@@ -35,7 +35,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: transit <daemon|adapter|enroll|config|status|inbox|room|pause|mcp|version>")
+		return fmt.Errorf("usage: transit <daemon|adapter|enroll|config|status|inbox|room|pause|skill|mcp|version>")
 	}
 	switch args[0] {
 	case "room":
@@ -54,6 +54,8 @@ func run(args []string) error {
 		return runInbox(args[1:])
 	case "pause":
 		return runPause(args[1:])
+	case "skill":
+		return runSkill(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	case "version":

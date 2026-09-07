@@ -89,13 +89,13 @@ The daemon derives the sender from the local agent session. Agents do not pass a
 
 ## 6. Install the agent skill
 
-Install the canonical skill for Claude Code:
+Install the canonical skill for Claude Code at the user level:
 
 ```bash
-npx skills add https://transit.orangecountyai.com/SKILL.md -g -a claude-code -y
+transit skill install
 ```
 
-The skill teaches agents how to handle Transit envelopes and settle channel deliveries. See [Agent skill](agent-skill.md) for the hosted and self-hosted install sources.
+The skill teaches agents how to handle Transit envelopes and settle channel deliveries. `transit skill` prints it without installing anything, and `transit skill uninstall` removes it. See [Agent skill](agent-skill.md) for the agent and repository options, and for installing from a server URL instead.
 
 ## 7. Send your first message
 

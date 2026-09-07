@@ -134,7 +134,7 @@ Install the agent guidance from the Worker that the host uses:
 npx skills add https://transit.example.com/SKILL.md -g -a claude-code -y
 ```
 
-The Worker serves that file at `/SKILL.md` with Markdown content and a short public cache lifetime.
+The Worker serves that file at `/SKILL.md` with Markdown content and a short public cache lifetime. An enrolled host reads that same copy with `transit skill`, because the CLI resolves the server from its own config rather than defaulting to the hosted one.
 
 ## Limits and retention
 
