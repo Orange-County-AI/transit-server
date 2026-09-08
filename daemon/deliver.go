@@ -395,6 +395,14 @@ func (d *Daemon) draftHolds() []draftHold {
 }
 
 func deliveryFailureCode(result PromptResult) string {
+	// `invalid_request` is Herdr rejecting the call itself — a method this
+	// build does not know, a field it no longer accepts — not the agent
+	// refusing the prompt. Reporting it as a prompt failure blames the agent
+	// for a version skew that clears on upgrade, the same distinction
+	// herdr_unavailable already draws against agent_not_found.
+	if result.Code == "invalid_request" {
+		return "herdr_unavailable"
+	}
 	if result.Code != "" {
 		return result.Code
 	}

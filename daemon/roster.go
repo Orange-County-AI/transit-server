@@ -93,13 +93,21 @@ func (d *Daemon) refreshRoster(ctx context.Context) (bool, error) {
 		if agents[index].Name != "" || agents[index].PaneID == "" {
 			continue
 		}
+		// One pane that will not take a name is not a roster outage. Returning
+		// here made rosterLoop skip sendRosters altogether, so a single failing
+		// rename took every native adapter off the Worker's map with it —
+		// exactly the coupling "Herdr is optional" forbids, and the opposite of
+		// Herdr's own rule that a rejected method disables only its own action.
+		// The pane stays unnamed and is retried on the next pass.
 		name, err := generateAutoName(agents[index].Kind, taken)
 		if err != nil {
-			return false, err
+			d.logf("auto-name %s: %v", agents[index].PaneID, err)
+			continue
 		}
 		renamed, err := d.herdr.Rename(ctx, agents[index].PaneID, name)
 		if err != nil {
-			return false, fmt.Errorf("auto-name %s: %w", agents[index].PaneID, err)
+			d.logf("auto-name %s: %v", agents[index].PaneID, err)
+			continue
 		}
 		agents[index] = *renamed
 		autoNames[renamed.PaneID] = renamed.Name

@@ -8,7 +8,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,10 +87,19 @@ func (e *HerdrAPIError) Error() string {
 	return "unknown herdr API error"
 }
 
+// minHerdrProtocol is a floor, not an exact match. Herdr bumps this number for
+// its own same-install concerns — direct terminal attach, live handoff, the
+// client-side renderer — and tells JSON API clients to ignore unknown fields
+// and treat unsupported methods as ordinary errors. Pinning an exact set meant
+// every unrelated Herdr release took the whole Herdr path down. 22 is Herdr
+// 0.9.0; older builds are refused outright rather than half-supported, which
+// is also what the plugin's min_herdr_version declares.
+const minHerdrProtocol = 22
+
 type herdrSocket struct {
 	path              string
 	logf              func(string)
-	acceptedProtocols map[int]struct{}
+	minProtocol       int
 	stallPollAttempts int
 	stallPollInterval time.Duration
 	mu                sync.Mutex
@@ -103,18 +111,14 @@ func newHerdrSocket(path string, logf func(string)) *herdrSocket {
 	if logf == nil {
 		logf = func(message string) { log.Print(message) }
 	}
-	accepted := map[int]struct{}{19: {}, 20: {}}
-	if override := strings.TrimSpace(os.Getenv("TRANSIT_HERDR_PROTOCOL_ALLOW")); override != "" {
-		accepted = make(map[int]struct{})
-		for _, part := range strings.Split(override, ",") {
-			protocol, err := strconv.Atoi(strings.TrimSpace(part))
-			if err == nil && protocol >= 0 {
-				accepted[protocol] = struct{}{}
-			}
+	minimum := minHerdrProtocol
+	if override := strings.TrimSpace(os.Getenv("TRANSIT_HERDR_PROTOCOL_MIN")); override != "" {
+		if protocol, err := strconv.Atoi(override); err == nil && protocol >= 0 {
+			minimum = protocol
 		}
 	}
 	return &herdrSocket{
-		path: path, logf: logf, acceptedProtocols: accepted,
+		path: path, logf: logf, minProtocol: minimum,
 		stallPollAttempts: 15, stallPollInterval: time.Second,
 	}
 }
@@ -347,8 +351,8 @@ func (d *herdrSocket) ping(ctx context.Context) (string, int, error) {
 	if pong.Type != "pong" {
 		return "", 0, fmt.Errorf("unexpected herdr ping response")
 	}
-	if _, accepted := d.acceptedProtocols[pong.Protocol]; !accepted {
-		return "", 0, fmt.Errorf("herdr protocol %d not accepted (accepted: %s)", pong.Protocol, d.acceptedProtocolString())
+	if pong.Protocol < d.minProtocol {
+		return "", 0, fmt.Errorf("herdr protocol %d is older than the minimum %d; upgrade herdr", pong.Protocol, d.minProtocol)
 	}
 	d.mu.Lock()
 	logProtocol := !d.loggedProtocol
@@ -385,26 +389,19 @@ func (d *herdrSocket) exchange(ctx context.Context, method string, params any) (
 	if err := json.NewDecoder(connection).Decode(&response); err != nil {
 		return herdrResponse{}, err
 	}
-	if response.ID != id {
+	// Herdr answers a request it could not parse — an unknown method, a field
+	// this build no longer accepts — with an empty id, because the id is parsed
+	// from the frame it just rejected. Its protocol asks JSON clients to treat
+	// those as ordinary errors, so an empty id carrying one is the answer to
+	// this call, not a crossed response. Rejecting it here reported every such
+	// rejection as "id mismatch" and threw away the code that said why.
+	if response.ID != id && !(response.ID == "" && response.Error != nil) {
 		return herdrResponse{}, fmt.Errorf("herdr response id mismatch")
 	}
 	if response.Error == nil && len(response.Result) == 0 {
 		return herdrResponse{}, fmt.Errorf("herdr response has no result or error")
 	}
 	return response, nil
-}
-
-func (d *herdrSocket) acceptedProtocolString() string {
-	protocols := make([]int, 0, len(d.acceptedProtocols))
-	for protocol := range d.acceptedProtocols {
-		protocols = append(protocols, protocol)
-	}
-	sort.Ints(protocols)
-	parts := make([]string, len(protocols))
-	for index, protocol := range protocols {
-		parts[index] = strconv.Itoa(protocol)
-	}
-	return strings.Join(parts, ", ")
 }
 
 func decodeHerdrAgent(raw json.RawMessage, allowedType string) (*HerdrAgent, error) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func fakeHerdr(t *testing.T, handler func(herdrRequest) (any, *HerdrAPIError)) s
 }
 
 func pong() map[string]any {
-	return map[string]any{"type": "pong", "version": "0.8.0", "protocol": 20}
+	return map[string]any{"type": "pong", "version": "0.9.0", "protocol": minHerdrProtocol}
 }
 
 func TestHerdrListAndPromptWait(t *testing.T) {
@@ -156,14 +157,35 @@ func TestHerdrLongPromptDoesNotBlockRosterCalls(t *testing.T) {
 	}
 }
 
-func TestHerdrProtocolOverride(t *testing.T) {
-	t.Setenv("TRANSIT_HERDR_PROTOCOL_ALLOW", "19")
+func TestHerdrProtocolFloorRejectsOlder(t *testing.T) {
+	path := fakeHerdr(t, func(request herdrRequest) (any, *HerdrAPIError) {
+		return map[string]any{"type": "pong", "version": "0.8.2", "protocol": minHerdrProtocol - 1}, nil
+	})
+	_, _, err := newHerdrSocket(path, func(string) {}).Ping(context.Background())
+	if err == nil {
+		t.Fatalf("protocol %d accepted below the floor %d", minHerdrProtocol-1, minHerdrProtocol)
+	}
+}
+
+// A newer Herdr must not take the Herdr path down: Herdr bumps this number for
+// same-install concerns that never touch the JSON API this daemon speaks.
+func TestHerdrProtocolFloorAcceptsNewer(t *testing.T) {
+	path := fakeHerdr(t, func(request herdrRequest) (any, *HerdrAPIError) {
+		return map[string]any{"type": "pong", "version": "9.9.9", "protocol": minHerdrProtocol + 7}, nil
+	})
+	if _, _, err := newHerdrSocket(path, func(string) {}).Ping(context.Background()); err != nil {
+		t.Fatalf("newer protocol rejected: %v", err)
+	}
+}
+
+func TestHerdrProtocolMinOverride(t *testing.T) {
+	t.Setenv("TRANSIT_HERDR_PROTOCOL_MIN", strconv.Itoa(minHerdrProtocol+1))
 	path := fakeHerdr(t, func(request herdrRequest) (any, *HerdrAPIError) {
 		return pong(), nil
 	})
 	_, _, err := newHerdrSocket(path, func(string) {}).Ping(context.Background())
 	if err == nil {
-		t.Fatal("protocol 20 accepted despite override to 19")
+		t.Fatalf("protocol %d accepted despite floor raised above it", minHerdrProtocol)
 	}
 }
 

@@ -175,11 +175,31 @@ tooling coherent.
 The enrolled origin selects the server: use `transit enroll --url https://<your-server> --code <code>`, or set `TRANSIT_URL` as the default for an enrollment without `--url`. The daemon persists that origin and derives its WebSocket endpoint from it; it has no runtime server override.
 
 **Decision — the daemon talks to herdr through its Unix-socket JSON protocol.**
-It accepts protocols 19 and 20, with `TRANSIT_HERDR_PROTOCOL_ALLOW` as the
-explicit override. It uses `agent.list`, `agent.get`, `agent.rename`, and
+It accepts protocol 22 or newer — a floor, not a set — with
+`TRANSIT_HERDR_PROTOCOL_MIN` as the explicit override. Herdr bumps that number
+for same-install concerns the JSON API never sees, such as direct terminal
+attach, live handoff, and its client-side renderer, and its own contract asks
+JSON clients to ignore unknown fields and treat unsupported methods as ordinary
+errors. An exact set therefore took the whole herdr path down on unrelated herdr
+releases; a floor does not. Protocol 22 is herdr 0.9.0, which is also the
+plugin's `min_herdr_version`. It uses `agent.list`, `agent.get`, `agent.rename`, and
 `agent.prompt` with `wait`; `pane.read` with `source=visible` and `strip_ansi`
 before each Herdr-path delivery to protect unsent composer input; `pane.send_keys`
-for stall recovery; and `notification.show`. The draft guard holds a delivery
+for stall recovery; and `notification.show`.
+
+**Decision — a herdr method the running build rejects disables that action
+alone.** Herdr's protocol asks JSON clients to ignore unknown fields and treat
+unsupported methods as ordinary errors, and it answers a frame it could not
+parse with an `invalid_request` error under an *empty* id rather than the
+request's. The daemon therefore accepts an empty id that carries an error as the
+answer to its own call, reports a rejected `agent.prompt` as retryable
+`herdr_unavailable` rather than `agent_prompt_failed`, fails the `pane.read`
+draft guard open, and logs a rejected `agent.rename` and moves on instead of
+failing the roster refresh. **Rationale:** each of those once escalated a
+single-method rejection into a wider outage — the id check masked the code that
+said why, a prompt rejection blamed the agent for a version skew, and one
+unnamed pane stopped `sendRosters` and took the native adapters off the Worker's
+map with it, which is the coupling "Herdr is optional" exists to forbid. The draft guard holds a delivery
 only when it positively recognizes a supported composer: an OMP/Pi box footer
 with its wrapped body, or a Claude Code `❯` row fenced by rule lines. A fence's
 trimmed form starts and ends with `─`, contains at least eight `─` glyphs, and

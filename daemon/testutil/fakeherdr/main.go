@@ -92,7 +92,7 @@ func serve(connection net.Conn, agent *fakeAgent, mu *sync.Mutex, prompts string
 func handle(req request, agent *fakeAgent, prompts string) (any, map[string]any) {
 	switch req.Method {
 	case "ping":
-		return map[string]any{"type": "pong", "version": "fake", "protocol": 20}, nil
+		return map[string]any{"type": "pong", "version": "fake", "protocol": 22}, nil
 	case "agent.list":
 		return map[string]any{"type": "agent_list", "agents": []any{agent}}, nil
 	case "agent.get":
